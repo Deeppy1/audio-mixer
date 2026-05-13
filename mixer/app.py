@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import socket
 import sys
 import threading
+from pathlib import Path
 
 from .audio_backend import AudioBackendError, PactlBackend
 from .models import RouteTargetSelection, RoutingMatrix
+
+
+CONTROL_SOCKET_PATH = Path("/tmp/audio-mixer-control.sock")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -40,7 +47,37 @@ def _build_parser() -> argparse.ArgumentParser:
     input_test_parser.add_argument("--seconds", type=float, default=4.0, help="Pass-through length in seconds")
     subparsers.add_parser("apply-saved", help="Apply routing from mixer-config.json")
     subparsers.add_parser("set-default-system", help="Set VM_System as the default desktop playback sink")
+
+    select_parser = subparsers.add_parser("select-strip", help="Select a strip in the running GUI")
+    select_parser.add_argument("strip", help="Strip key or alias such as hw1, hw2, sys, vi1, vi2")
+
+    volume_up_parser = subparsers.add_parser("volume-up", help="Raise the selected strip volume in the running GUI")
+    volume_up_parser.add_argument("--steps", type=int, default=1, help="Number of configured volume steps")
+
+    volume_down_parser = subparsers.add_parser("volume-down", help="Lower the selected strip volume in the running GUI")
+    volume_down_parser.add_argument("--steps", type=int, default=1, help="Number of configured volume steps")
     return parser
+
+
+def _source_aliases() -> dict[str, str]:
+    return {
+        "hw1": "hardware_input_1",
+        "hw2": "hardware_input_2",
+        "sys": "system_playback",
+        "in1": "virtual_input_1",
+        "in2": "virtual_input_2",
+        "vi1": "virtual_input_1",
+        "vi2": "virtual_input_2",
+        "hardware_input_1": "hardware_input_1",
+        "hardware_input_2": "hardware_input_2",
+        "system_playback": "system_playback",
+        "virtual_input_1": "virtual_input_1",
+        "virtual_input_2": "virtual_input_2",
+    }
+
+
+def _resolve_source_key(value: str) -> str:
+    return _source_aliases().get(value.lower().strip(), "")
 
 
 def _print_devices(backend: PactlBackend) -> int:
@@ -157,6 +194,48 @@ def _set_default_system_cli(backend: PactlBackend) -> int:
     return 0
 
 
+def _send_remote_command(payload: dict) -> dict:
+    if not CONTROL_SOCKET_PATH.exists():
+        raise AudioBackendError("The mixer GUI control socket is not available. Start the GUI first.")
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(CONTROL_SOCKET_PATH))
+            client.sendall(json.dumps(payload).encode("utf-8"))
+            client.shutdown(socket.SHUT_WR)
+            response = client.recv(8192)
+    except OSError as exc:
+        raise AudioBackendError(f"Unable to contact the running mixer GUI: {exc}") from exc
+
+    if not response:
+        raise AudioBackendError("The running mixer GUI returned an empty response.")
+
+    try:
+        decoded = json.loads(response.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise AudioBackendError("The running mixer GUI returned an invalid response.") from exc
+
+    if not decoded.get("ok", False):
+        raise AudioBackendError(decoded.get("error", "Unknown remote control error."))
+    return decoded
+
+
+def _select_strip_cli(args: argparse.Namespace) -> int:
+    source_key = _resolve_source_key(args.strip)
+    if not source_key:
+        raise AudioBackendError(f"Unknown strip '{args.strip}'.")
+    response = _send_remote_command({"action": "select-strip", "source_key": source_key})
+    print(response.get("message", f"Selected {source_key}."))
+    return 0
+
+
+def _volume_adjust_cli(direction: str, args: argparse.Namespace) -> int:
+    steps = max(1, int(args.steps))
+    response = _send_remote_command({"action": direction, "steps": steps})
+    print(response.get("message", "Volume updated."))
+    return 0
+
+
 def _run_gui() -> int:
     try:
         import tkinter as tk
@@ -224,6 +303,9 @@ def _run_gui() -> int:
             self.keybind_window: tk.Toplevel | None = None
             self.keybind_value_vars: dict[str, tk.StringVar] = {}
             self.key_capture_target: tuple[str, str] | None = None
+            self.command_server_socket: socket.socket | None = None
+            self.command_server_thread: threading.Thread | None = None
+            self.command_server_stop = threading.Event()
 
             self._build_ui()
             self._bind_shortcuts()
@@ -232,6 +314,7 @@ def _run_gui() -> int:
             self.loading_config = True
             self.load_saved_config()
             self.loading_config = False
+            self._start_command_server()
 
         def _build_ui(self) -> None:
             top = ttk.Frame(self.root, padding=12)
@@ -635,6 +718,97 @@ def _run_gui() -> int:
             label = self.strip_label_vars[source_key].get().strip() or self.default_route_labels[source_key]
             self.status_var.set(f"{label} volume {new_volume}%")
 
+        def _start_command_server(self) -> None:
+            self.command_server_stop.clear()
+            self._cleanup_control_socket()
+            try:
+                server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                server.bind(str(CONTROL_SOCKET_PATH))
+                server.listen()
+                server.settimeout(0.5)
+            except OSError as exc:
+                self.status_var.set(f"Remote control disabled: {exc}")
+                return
+
+            self.command_server_socket = server
+            self.command_server_thread = threading.Thread(target=self._command_server_loop, daemon=True)
+            self.command_server_thread.start()
+
+        def _command_server_loop(self) -> None:
+            server = self.command_server_socket
+            if server is None:
+                return
+            while not self.command_server_stop.is_set():
+                try:
+                    conn, _addr = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+                with conn:
+                    try:
+                        raw = conn.recv(8192)
+                        payload = json.loads(raw.decode("utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        self._send_command_response(conn, {"ok": False, "error": "Invalid command payload."})
+                        continue
+
+                    response_holder: dict[str, dict] = {}
+                    done = threading.Event()
+                    self.root.after(0, lambda payload=payload: self._execute_remote_command(payload, response_holder, done))
+                    done.wait(timeout=2.0)
+                    response = response_holder.get("response", {"ok": False, "error": "Command timed out."})
+                    self._send_command_response(conn, response)
+
+        def _execute_remote_command(self, payload: dict, response_holder: dict[str, dict], done: threading.Event) -> None:
+            try:
+                action = payload.get("action", "")
+                if action == "select-strip":
+                    source_key = str(payload.get("source_key", ""))
+                    if source_key not in self.default_route_labels:
+                        raise AudioBackendError(f"Unknown strip '{source_key}'.")
+                    self.select_strip(source_key)
+                    label = self.strip_label_vars[source_key].get().strip() or self.default_route_labels[source_key]
+                    response_holder["response"] = {"ok": True, "message": f"Selected fader: {label}"}
+                elif action in {"volume-up", "volume-down"}:
+                    steps = max(1, int(payload.get("steps", 1)))
+                    direction = 1 if action == "volume-up" else -1
+                    for _ in range(steps):
+                        self.adjust_selected_strip_volume(direction)
+                    label = self.selected_strip_label_var.get()
+                    volume = self.strip_volume_vars[self.selected_strip_var.get()].get()
+                    response_holder["response"] = {"ok": True, "message": f"{label} volume {volume}%"}
+                else:
+                    raise AudioBackendError(f"Unknown remote action '{action}'.")
+            except (AudioBackendError, TypeError, ValueError) as exc:
+                response_holder["response"] = {"ok": False, "error": str(exc)}
+            finally:
+                done.set()
+
+        def _send_command_response(self, conn, response: dict) -> None:
+            try:
+                conn.sendall(json.dumps(response).encode("utf-8"))
+            except OSError:
+                pass
+
+        def _stop_command_server(self) -> None:
+            self.command_server_stop.set()
+            if self.command_server_socket is not None:
+                try:
+                    self.command_server_socket.close()
+                except OSError:
+                    pass
+                self.command_server_socket = None
+            self._cleanup_control_socket()
+
+        def _cleanup_control_socket(self) -> None:
+            try:
+                if CONTROL_SOCKET_PATH.exists() or CONTROL_SOCKET_PATH.is_socket():
+                    CONTROL_SOCKET_PATH.unlink()
+            except OSError:
+                pass
+
         def load_saved_config(self) -> None:
             config = self.backend.load_config()
             if not config:
@@ -835,6 +1009,7 @@ def _run_gui() -> int:
 
         def close(self) -> None:
             self.close_keybind_window()
+            self._stop_command_server()
             self.root.destroy()
 
     root = tk.Tk()
@@ -871,6 +1046,12 @@ def main() -> None:
             raise SystemExit(_test_output_cli(backend, args))
         if args.command == "test-input":
             raise SystemExit(_test_input_cli(backend, args))
+        if args.command == "select-strip":
+            raise SystemExit(_select_strip_cli(args))
+        if args.command == "volume-up":
+            raise SystemExit(_volume_adjust_cli("volume-up", args))
+        if args.command == "volume-down":
+            raise SystemExit(_volume_adjust_cli("volume-down", args))
 
         parser.print_help()
         raise SystemExit(0)

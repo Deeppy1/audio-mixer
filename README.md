@@ -142,6 +142,15 @@ Apply the last saved config:
 python3 app.py apply-saved
 ```
 
+Control a running GUI instance from another process:
+
+```bash
+python3 app.py select-strip hw1
+python3 app.py select-strip in1
+python3 app.py volume-up
+python3 app.py volume-down --steps 2
+```
+
 Apply routing directly from CLI:
 
 ```bash
@@ -160,6 +169,7 @@ python3 app.py apply \
 
 - `hw1`, `hw2` = hardware inputs
 - `sys` = `VM_System`
+- `in1`, `in2` = bottom two virtual input strips
 - `vi1`, `vi2` = virtual input strips
 - `A1`, `A2` = physical output buses
 - `B1`, `B2` = virtual output buses
@@ -202,6 +212,7 @@ Notes:
 - Open `Keybinds`, click `Set Key` next to a strip, then press the shortcut you want to bind
 - The keybind editor opens in its own window and captures the actual key combination directly
 - The same window can also bind `Selected Fader Up` and `Selected Fader Down` shortcuts, with a configurable step size
+- The running GUI exposes a local control socket at `/tmp/audio-mixer-control.sock` so external tools such as Hyprland can drive strip selection and volume
 
 Saved file:
 
