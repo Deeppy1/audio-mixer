@@ -1,0 +1,66 @@
+{
+  "loopback_modules": [
+    536870927,
+    536870926,
+    536870925,
+    536870924,
+    536870923,
+    536870928,
+    536870929
+  ],
+  "normalize_modules": [],
+  "routing": {
+    "matrix": {
+      "hardware_input_1": {
+        "A1": false,
+        "A2": false,
+        "B1": true,
+        "B2": true
+      },
+      "hardware_input_2": {
+        "A1": false,
+        "A2": false,
+        "B1": true,
+        "B2": true
+      },
+      "system_playback": {
+        "A1": true,
+        "A2": false,
+        "B1": false,
+        "B2": false
+      },
+      "virtual_input_1": {
+        "A1": true,
+        "A2": false,
+        "B1": false,
+        "B2": false
+      },
+      "virtual_input_2": {
+        "A1": true,
+        "A2": false,
+        "B1": false,
+        "B2": false
+      }
+    },
+    "source_map": {
+      "bus_b1": "vm_out_b1",
+      "bus_b2": "vm_out_b2",
+      "hardware_input_1": "alsa_input.usb-C-Media_Electronics_Inc._TONOR_TC-777_Audio_Device-00.pro-input-0",
+      "hardware_input_2": "bluez_input.7C:C0:6F:AA:CB:18",
+      "system_playback": "vm_system.monitor",
+      "virtual_input_1": "vm_input_1.monitor",
+      "virtual_input_2": "vm_input_2.monitor"
+    },
+    "targets": {
+      "a1_sink": "alsa_output.pci-0000_08_00.4.analog-stereo",
+      "a2_sink": "alsa_output.pci-0000_08_00.4.analog-stereo"
+    }
+  },
+  "virtual_modules": {
+    "bus_b1": 536870918,
+    "bus_b2": 536870919,
+    "system_playback": 536870920,
+    "virtual_input_1": 536870916,
+    "virtual_input_2": 536870917
+  }
+}

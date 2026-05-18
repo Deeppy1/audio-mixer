@@ -1,0 +1,64 @@
+{
+  "matrix": {
+    "hardware_input_1": {
+      "A1": false,
+      "A2": false,
+      "B1": true,
+      "B2": true
+    },
+    "hardware_input_2": {
+      "A1": false,
+      "A2": false,
+      "B1": true,
+      "B2": true
+    },
+    "system_playback": {
+      "A1": true,
+      "A2": false,
+      "B1": false,
+      "B2": false
+    },
+    "virtual_input_1": {
+      "A1": true,
+      "A2": false,
+      "B1": false,
+      "B2": false
+    },
+    "virtual_input_2": {
+      "A1": true,
+      "A2": false,
+      "B1": false,
+      "B2": false
+    }
+  },
+  "sources": {
+    "hardware_input_1": "alsa_input.usb-C-Media_Electronics_Inc._TONOR_TC-777_Audio_Device-00.pro-input-0",
+    "hardware_input_2": "bluez_input.7C:C0:6F:AA:CB:18"
+  },
+  "strip_settings": {
+    "hardware_input_1": {
+      "label": "Main mic",
+      "muted": false
+    },
+    "hardware_input_2": {
+      "label": "Webcam mic",
+      "muted": false
+    },
+    "system_playback": {
+      "label": "System Playback",
+      "muted": false
+    },
+    "virtual_input_1": {
+      "label": "Input 1",
+      "muted": false
+    },
+    "virtual_input_2": {
+      "label": "Input 2",
+      "muted": false
+    }
+  },
+  "targets": {
+    "a1_sink": "alsa_output.pci-0000_08_00.4.analog-stereo",
+    "a2_sink": "alsa_output.pci-0000_08_00.4.analog-stereo"
+  }
+}
