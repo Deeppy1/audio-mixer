@@ -21,7 +21,7 @@ CONTROL_SOCKET_PATH = Path("/tmp/audio-mixer-control.sock")
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Audio mixer MVP")
+    parser = argparse.ArgumentParser(description="Audio mixer")
     parser.add_argument("--gui", action="store_true", help="Launch the Tk GUI")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -256,7 +256,7 @@ def _run_gui() -> int:
         def __init__(self, root: tk.Tk) -> None:
             self.root = root
             self.backend = PactlBackend()
-            self.root.title("Audio Mixer MVP")
+            self.root.title("Audio Mixer")
             self.root.geometry("980x560")
             self.root.protocol("WM_DELETE_WINDOW", self.close)
 
