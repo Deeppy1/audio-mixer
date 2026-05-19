@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-
+from version import version
 from .audio_backend import AudioBackendError, PactlBackend
 from .models import RouteTargetSelection, RoutingMatrix
 
@@ -473,7 +473,8 @@ def _run_gui() -> int:
                 "VM_Input_1 and VM_Input_2 are extra playback devices for specific apps.\n"
                 "VM_Bus_B1 and VM_Bus_B2 expose monitor sources that other apps can record.\n"
                 "Click a strip to make it active, or configure selection shortcuts in Keybinds.\n"
-                "Ducking temporarily lowers System Playback, Input 1, and Input 2 while the selected mic is active."
+                "Ducking temporarily lowers System Playback, Input 1, and Input 2 while the selected mic is active.\n"
+                "Version:",version
             )
             ttk.Label(top, text=help_text, justify="left").pack(anchor="w")
 

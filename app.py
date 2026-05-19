@@ -1,6 +1,6 @@
+from version import version
 from mixer.app import main
 
-
 if __name__ == "__main__":
+    print(version)
     main()
-#Version 0.1.2 19/5/26
