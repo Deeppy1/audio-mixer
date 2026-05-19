@@ -1,16 +1,23 @@
 {
+  "controller_binding": {},
+  "ducking": {
+    "amount_percent": 60,
+    "enabled": false,
+    "source": "Hardware In 2",
+    "threshold_percent": 10
+  },
   "matrix": {
     "hardware_input_1": {
       "A1": false,
       "A2": false,
       "B1": true,
-      "B2": true
+      "B2": false
     },
     "hardware_input_2": {
       "A1": false,
       "A2": false,
-      "B1": true,
-      "B2": true
+      "B1": false,
+      "B2": false
     },
     "system_playback": {
       "A1": true,
@@ -31,34 +38,45 @@
       "B2": false
     }
   },
+  "selection_keybinds": {},
   "sources": {
     "hardware_input_1": "alsa_input.usb-C-Media_Electronics_Inc._TONOR_TC-777_Audio_Device-00.pro-input-0",
-    "hardware_input_2": "bluez_input.7C:C0:6F:AA:CB:18"
+    "hardware_input_2": "alsa_input.usb-046d_HD_Pro_Webcam_C920_D12650BF-02.analog-stereo"
   },
   "strip_settings": {
     "hardware_input_1": {
-      "label": "Main mic",
-      "muted": false
+      "label": "Hardware In 1",
+      "muted": false,
+      "volume_percent": 101
     },
     "hardware_input_2": {
       "label": "Webcam mic",
-      "muted": false
+      "muted": false,
+      "volume_percent": 94
     },
     "system_playback": {
       "label": "System Playback",
-      "muted": false
+      "muted": false,
+      "volume_percent": 87
     },
     "virtual_input_1": {
       "label": "Input 1",
-      "muted": false
+      "muted": false,
+      "volume_percent": 95
     },
     "virtual_input_2": {
       "label": "Input 2",
-      "muted": false
+      "muted": false,
+      "volume_percent": 95
     }
   },
   "targets": {
     "a1_sink": "alsa_output.pci-0000_08_00.4.analog-stereo",
     "a2_sink": "alsa_output.pci-0000_08_00.4.analog-stereo"
+  },
+  "volume_keybinds": {
+    "down": "Ctrl+Down",
+    "step_percent": 5,
+    "up": "Ctrl+Up"
   }
 }

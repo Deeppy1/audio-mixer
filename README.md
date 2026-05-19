@@ -32,6 +32,7 @@ It does **not** implement a custom driver. It builds on PipeWire or PulseAudio v
 - Editable strip labels in the GUI
 - Per-strip mute in the GUI
 - Per-strip volume faders in the GUI
+- Optional mic-triggered ducking for `System Playback`, `Input 1`, and `Input 2`
 - Keyboard shortcuts to select a specific strip fader in the GUI, configured from a dedicated keybinds window
 - Saved config in `mixer-config.json`
 - Re-apply saved routing with `apply-saved`
@@ -213,6 +214,7 @@ Notes:
 - The keybind editor opens in its own window and captures the actual key combination directly
 - The same window can also bind `Selected Fader Up` and `Selected Fader Down` shortcuts, with a configurable step size
 - The running GUI exposes a local control socket at `/tmp/audio-mixer-control.sock` so external tools such as Hyprland can drive strip selection and volume
+- The `Ducking` section can monitor `Hardware In 1` or `Hardware In 2` and temporarily lower `System Playback`, `Input 1`, and `Input 2` while you speak
 
 Saved file:
 

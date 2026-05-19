@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import socket
+import struct
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from .audio_backend import AudioBackendError, PactlBackend
@@ -247,6 +251,7 @@ def _run_gui() -> int:
 
     class MixerApp:
         ROUTE_TARGETS = ("A1", "A2", "B1", "B2")
+        DUCKED_SOURCE_KEYS = ("system_playback", "virtual_input_1", "virtual_input_2")
 
         def __init__(self, root: tk.Tk) -> None:
             self.root = root
@@ -262,6 +267,10 @@ def _run_gui() -> int:
             self.hw2_var = tk.StringVar()
             self.selected_strip_var = tk.StringVar()
             self.selected_strip_label_var = tk.StringVar()
+            self.ducking_enabled_var = tk.BooleanVar(value=False)
+            self.ducking_source_var = tk.StringVar(value="Hardware In 1")
+            self.ducking_amount_var = tk.IntVar(value=35)
+            self.ducking_threshold_var = tk.IntVar(value=10)
 
             self.route_vars: dict[str, dict[str, tk.BooleanVar]] = {}
             self.route_rows = [
@@ -306,11 +315,16 @@ def _run_gui() -> int:
             self.command_server_socket: socket.socket | None = None
             self.command_server_thread: threading.Thread | None = None
             self.command_server_stop = threading.Event()
+            self.ducking_thread: threading.Thread | None = None
+            self.ducking_stop = threading.Event()
+            self.ducking_active = False
 
             self._build_ui()
             self._bind_shortcuts()
             self.refresh_devices()
             self._bind_volume_traces()
+            self.ducking_amount_var.trace_add("write", lambda *_args: self._update_ducking_config())
+            self.ducking_threshold_var.trace_add("write", lambda *_args: self._update_ducking_config())
             self.loading_config = True
             self.load_saved_config()
             self.loading_config = False
@@ -417,11 +431,49 @@ def _run_gui() -> int:
             ttk.Label(selected_strip_frame, text="Selected Fader").pack(side="left")
             ttk.Label(selected_strip_frame, textvariable=self.selected_strip_label_var).pack(side="left", padx=(8, 0))
 
+            ducking_frame = ttk.LabelFrame(top, text="Ducking", padding=12)
+            ducking_frame.pack(fill="x", pady=(12, 0))
+            ttk.Checkbutton(
+                ducking_frame,
+                text="Enable ducking while mic is active",
+                variable=self.ducking_enabled_var,
+                command=self.toggle_ducking,
+            ).grid(row=0, column=0, columnspan=2, sticky="w")
+            ttk.Label(ducking_frame, text="Trigger Input").grid(row=1, column=0, sticky="w", pady=(10, 0))
+            self.ducking_source_combo = ttk.Combobox(
+                ducking_frame,
+                textvariable=self.ducking_source_var,
+                state="readonly",
+                values=["Hardware In 1", "Hardware In 2"],
+                width=18,
+            )
+            self.ducking_source_combo.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(10, 0))
+            self.ducking_source_combo.bind("<<ComboboxSelected>>", lambda _event: self._ducking_source_changed())
+            ttk.Label(ducking_frame, text="Duck Amount %").grid(row=1, column=2, sticky="w", padx=(24, 0), pady=(10, 0))
+            ttk.Spinbox(
+                ducking_frame,
+                from_=5,
+                to=90,
+                textvariable=self.ducking_amount_var,
+                width=6,
+                command=self._update_ducking_config,
+            ).grid(row=1, column=3, sticky="w", padx=(12, 0), pady=(10, 0))
+            ttk.Label(ducking_frame, text="Threshold %").grid(row=1, column=4, sticky="w", padx=(24, 0), pady=(10, 0))
+            ttk.Spinbox(
+                ducking_frame,
+                from_=1,
+                to=60,
+                textvariable=self.ducking_threshold_var,
+                width=6,
+                command=self._update_ducking_config,
+            ).grid(row=1, column=5, sticky="w", padx=(12, 0), pady=(10, 0))
+
             help_text = (
                 "VM_System is a dedicated playback device for general desktop audio.\n"
                 "VM_Input_1 and VM_Input_2 are extra playback devices for specific apps.\n"
                 "VM_Bus_B1 and VM_Bus_B2 expose monitor sources that other apps can record.\n"
-                "Click a strip to make it active, or configure selection shortcuts in Keybinds."
+                "Click a strip to make it active, or configure selection shortcuts in Keybinds.\n"
+                "Ducking temporarily lowers System Playback, Input 1, and Input 2 while the selected mic is active."
             )
             ttk.Label(top, text=help_text, justify="left").pack(anchor="w")
 
@@ -490,6 +542,145 @@ def _run_gui() -> int:
             label = self.strip_label_vars[source_key].get().strip() or self.default_route_labels[source_key]
             self.selected_strip_label_var.set(label)
             self.status_var.set(f"Selected fader: {label}")
+
+        def _ducking_config(self) -> dict[str, int | bool | str]:
+            return {
+                "enabled": bool(self.ducking_enabled_var.get()),
+                "source": self.ducking_source_var.get(),
+                "amount_percent": max(5, min(90, int(self.ducking_amount_var.get() or 35))),
+                "threshold_percent": max(1, min(60, int(self.ducking_threshold_var.get() or 10))),
+            }
+
+        def _update_ducking_config(self) -> None:
+            if self.loading_config:
+                return
+            self.backend.save_ducking_config(self._ducking_config())
+            if self.ducking_active:
+                self._apply_ducking_state(True)
+
+        def _ducking_source_changed(self) -> None:
+            self._update_ducking_config()
+            if self.ducking_enabled_var.get():
+                self._stop_ducking_monitor()
+                self._start_ducking_monitor()
+
+        def _ducking_source_name(self) -> str:
+            source_label = self.ducking_source_var.get()
+            if source_label == "Hardware In 2":
+                return self.hw2_var.get()
+            return self.hw1_var.get()
+
+        def toggle_ducking(self) -> None:
+            self._update_ducking_config()
+            if self.ducking_enabled_var.get():
+                self._start_ducking_monitor()
+            else:
+                self._stop_ducking_monitor()
+
+        def _start_ducking_monitor(self) -> None:
+            source_name = self._ducking_source_name()
+            if not source_name:
+                self.ducking_enabled_var.set(False)
+                self.status_var.set("Select the ducking input source first.")
+                self._update_ducking_config()
+                return
+            if self.ducking_thread is not None and self.ducking_thread.is_alive():
+                return
+            self.ducking_stop.clear()
+            self.ducking_thread = threading.Thread(target=self._ducking_monitor_loop, daemon=True)
+            self.ducking_thread.start()
+            self.status_var.set(f"Ducking armed on {source_name}")
+
+        def _stop_ducking_monitor(self) -> None:
+            self.ducking_stop.set()
+            self.ducking_thread = None
+            if self.ducking_active:
+                self._apply_ducking_state(False)
+
+        def _ducking_monitor_loop(self) -> None:
+            source_name = self._ducking_source_name()
+            args = [
+                "pw-record",
+                "--target",
+                source_name,
+                "--rate=16000",
+                "--channels=1",
+                "--format=s16",
+                "-",
+            ]
+            try:
+                process = subprocess.Popen(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=os.environ.copy(),
+                )
+            except OSError as exc:
+                self.root.after(0, lambda: self._ducking_monitor_failed(f"Ducking unavailable: {exc}"))
+                return
+
+            release_seconds = 0.6
+            last_active = 0.0
+            active_state = False
+            try:
+                while not self.ducking_stop.is_set():
+                    if process.stdout is None:
+                        break
+                    chunk = process.stdout.read(3200)
+                    if not chunk:
+                        break
+                    level_percent = self._pcm_level_percent(chunk)
+                    threshold = max(1, min(60, int(self.ducking_threshold_var.get() or 10)))
+                    now = time.monotonic()
+                    if level_percent >= threshold:
+                        last_active = now
+                    should_be_active = (now - last_active) <= release_seconds
+                    if should_be_active != active_state:
+                        active_state = should_be_active
+                        self.root.after(0, lambda active_state=active_state: self._apply_ducking_state(active_state))
+            finally:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                self.root.after(0, lambda: self._apply_ducking_state(False))
+
+        def _pcm_level_percent(self, chunk: bytes) -> int:
+            sample_count = len(chunk) // 2
+            if sample_count <= 0:
+                return 0
+            samples = struct.unpack("<" + ("h" * sample_count), chunk[: sample_count * 2])
+            rms = math.sqrt(sum(sample * sample for sample in samples) / sample_count)
+            return int(round((rms / 32767.0) * 100))
+
+        def _ducking_monitor_failed(self, message: str) -> None:
+            self.ducking_enabled_var.set(False)
+            self.status_var.set(message)
+            self._update_ducking_config()
+
+        def _effective_strip_volume(self, source_key: str) -> int:
+            base_volume = int(self.strip_volume_vars[source_key].get())
+            if not self.ducking_active or source_key not in self.DUCKED_SOURCE_KEYS:
+                return base_volume
+            amount = max(5, min(90, int(self.ducking_amount_var.get() or 35)))
+            return max(0, min(150, int(round(base_volume * (100 - amount) / 100))))
+
+        def _apply_ducking_state(self, active: bool) -> None:
+            self.ducking_active = active and bool(self.ducking_enabled_var.get())
+            for source_key in self.DUCKED_SOURCE_KEYS:
+                try:
+                    self.backend.apply_live_strip_volume(source_key, self._effective_strip_volume(source_key))
+                except AudioBackendError:
+                    continue
+            if self.ducking_active:
+                self.status_var.set("Ducking active")
 
         def open_keybind_window(self) -> None:
             if self.keybind_window is not None and self.keybind_window.winfo_exists():
@@ -820,6 +1011,7 @@ def _run_gui() -> int:
             strip_settings = config.get("strip_settings", {})
             saved_selection_keybinds = config.get("selection_keybinds", {})
             saved_volume_keybinds = config.get("volume_keybinds", {})
+            ducking = config.get("ducking", {})
 
             if targets.get("a1_sink") in self.sinks:
                 self.a1_var.set(targets["a1_sink"])
@@ -865,6 +1057,20 @@ def _run_gui() -> int:
                 self.volume_keybinds["step_percent"] = int(saved_volume_keybinds.get("step_percent", 5))
             except (TypeError, ValueError):
                 self.volume_keybinds["step_percent"] = 5
+            self.ducking_enabled_var.set(bool(ducking.get("enabled", False)))
+            source_label = ducking.get("source", "Hardware In 1")
+            if source_label in {"Hardware In 1", "Hardware In 2"}:
+                self.ducking_source_var.set(source_label)
+            try:
+                self.ducking_amount_var.set(int(ducking.get("amount_percent", 35)))
+            except (TypeError, ValueError):
+                self.ducking_amount_var.set(35)
+            try:
+                self.ducking_threshold_var.set(int(ducking.get("threshold_percent", 10)))
+            except (TypeError, ValueError):
+                self.ducking_threshold_var.set(10)
+            if self.ducking_enabled_var.get():
+                self._start_ducking_monitor()
 
         def create_virtual_devices(self) -> None:
             try:
@@ -924,6 +1130,8 @@ def _run_gui() -> int:
                 messagebox.showerror("Audio backend error", str(exc))
                 self.status_var.set(str(exc))
                 return
+            if self.ducking_enabled_var.get():
+                self._apply_ducking_state(self.ducking_active)
 
             self.status_var.set("Routing applied")
 
@@ -952,6 +1160,11 @@ def _run_gui() -> int:
                 self._show_backend_error(str(exc))
                 return
             self.strip_volume_vars[source_key].set(volume)
+            if self.ducking_enabled_var.get() and source_key in self.DUCKED_SOURCE_KEYS:
+                try:
+                    self.backend.apply_live_strip_volume(source_key, self._effective_strip_volume(source_key))
+                except AudioBackendError as exc:
+                    self._show_backend_error(str(exc))
 
         def run_in_background(self, action) -> None:
             thread = threading.Thread(target=action, daemon=True)
@@ -1009,6 +1222,7 @@ def _run_gui() -> int:
 
         def close(self) -> None:
             self.close_keybind_window()
+            self._stop_ducking_monitor()
             self._stop_command_server()
             self.root.destroy()
 

@@ -189,6 +189,7 @@ class PactlBackend:
             "controller_binding": existing_config.get("controller_binding", {}),
             "selection_keybinds": existing_config.get("selection_keybinds", {}),
             "volume_keybinds": existing_config.get("volume_keybinds", {}),
+            "ducking": existing_config.get("ducking", {}),
         }
         self._write_config(payload)
 
@@ -199,6 +200,12 @@ class PactlBackend:
             return json.load(handle)
 
     def update_strip_volume(self, source_key: str, volume_percent: int) -> int:
+        return self._set_strip_volume(source_key, volume_percent, persist=True)
+
+    def apply_live_strip_volume(self, source_key: str, volume_percent: int) -> int:
+        return self._set_strip_volume(source_key, volume_percent, persist=False)
+
+    def _set_strip_volume(self, source_key: str, volume_percent: int, persist: bool) -> int:
         volume = max(0, min(150, int(round(volume_percent))))
         state = self._load_state()
         active_loopbacks = state.get("routing", {}).get("active_loopbacks", [])
@@ -211,12 +218,12 @@ class PactlBackend:
             sink_input_id = self._find_loopback_sink_input_id(module_id, attempts=4, delay_seconds=0.02)
             if sink_input_id is not None:
                 self._set_sink_input_volume(sink_input_id, volume)
-
-        config = self.load_config()
-        strip_settings = config.setdefault("strip_settings", {})
-        source_settings = strip_settings.setdefault(source_key, {})
-        source_settings["volume_percent"] = volume
-        self._write_config(config)
+        if persist:
+            config = self.load_config()
+            strip_settings = config.setdefault("strip_settings", {})
+            source_settings = strip_settings.setdefault(source_key, {})
+            source_settings["volume_percent"] = volume
+            self._write_config(config)
         return volume
 
     def save_controller_binding(self, binding: dict) -> None:
@@ -232,6 +239,11 @@ class PactlBackend:
     def save_volume_keybinds(self, keybinds: dict[str, str | int]) -> None:
         config = self.load_config()
         config["volume_keybinds"] = keybinds
+        self._write_config(config)
+
+    def save_ducking_config(self, ducking: dict) -> None:
+        config = self.load_config()
+        config["ducking"] = ducking
         self._write_config(config)
 
     def _strip_volume_percent(self, strip_settings: dict[str, dict] | None, source_key: str) -> int:
