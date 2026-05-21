@@ -310,6 +310,7 @@ def _run_gui() -> int:
             self.pending_volume_jobs: dict[str, str] = {}
             self.loading_config = False
             self.keybind_window: tk.Toplevel | None = None
+            self.ducking_window: tk.Toplevel | None = None
             self.keybind_value_vars: dict[str, tk.StringVar] = {}
             self.key_capture_target: tuple[str, str] | None = None
             self.command_server_socket: socket.socket | None = None
@@ -348,6 +349,7 @@ def _run_gui() -> int:
                 side="left", padx=8
             )
             ttk.Button(control_bar, text="Keybinds", command=self.open_keybind_window).pack(side="left")
+            ttk.Button(control_bar, text="Ducking", command=self.open_ducking_window).pack(side="left", padx=(8, 0))
 
             config_frame = ttk.LabelFrame(top, text="Bus Targets", padding=12)
             config_frame.pack(fill="x", pady=12)
@@ -431,49 +433,12 @@ def _run_gui() -> int:
             ttk.Label(selected_strip_frame, text="Selected Fader").pack(side="left")
             ttk.Label(selected_strip_frame, textvariable=self.selected_strip_label_var).pack(side="left", padx=(8, 0))
 
-            ducking_frame = ttk.LabelFrame(top, text="Ducking", padding=12)
-            ducking_frame.pack(fill="x", pady=(12, 0))
-            ttk.Checkbutton(
-                ducking_frame,
-                text="Enable ducking while mic is active",
-                variable=self.ducking_enabled_var,
-                command=self.toggle_ducking,
-            ).grid(row=0, column=0, columnspan=2, sticky="w")
-            ttk.Label(ducking_frame, text="Trigger Input").grid(row=1, column=0, sticky="w", pady=(10, 0))
-            self.ducking_source_combo = ttk.Combobox(
-                ducking_frame,
-                textvariable=self.ducking_source_var,
-                state="readonly",
-                values=["Hardware In 1", "Hardware In 2"],
-                width=18,
-            )
-            self.ducking_source_combo.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(10, 0))
-            self.ducking_source_combo.bind("<<ComboboxSelected>>", lambda _event: self._ducking_source_changed())
-            ttk.Label(ducking_frame, text="Duck Amount %").grid(row=1, column=2, sticky="w", padx=(24, 0), pady=(10, 0))
-            ttk.Spinbox(
-                ducking_frame,
-                from_=5,
-                to=90,
-                textvariable=self.ducking_amount_var,
-                width=6,
-                command=self._update_ducking_config,
-            ).grid(row=1, column=3, sticky="w", padx=(12, 0), pady=(10, 0))
-            ttk.Label(ducking_frame, text="Threshold %").grid(row=1, column=4, sticky="w", padx=(24, 0), pady=(10, 0))
-            ttk.Spinbox(
-                ducking_frame,
-                from_=1,
-                to=60,
-                textvariable=self.ducking_threshold_var,
-                width=6,
-                command=self._update_ducking_config,
-            ).grid(row=1, column=5, sticky="w", padx=(12, 0), pady=(10, 0))
-
             help_text = (
                 "VM_System is a dedicated playback device for general desktop audio.\n"
                 "VM_Input_1 and VM_Input_2 are extra playback devices for specific apps.\n"
                 "VM_Bus_B1 and VM_Bus_B2 expose monitor sources that other apps can record.\n"
                 "Click a strip to make it active, or configure selection shortcuts in Keybinds.\n"
-                "Ducking temporarily lowers System Playback, Input 1, and Input 2 while the selected mic is active.\n"
+                "Open Ducking to lower System Playback, Input 1, and Input 2 while the selected mic is active.\n"
                 f"Version: {version}"
             )
             ttk.Label(top, text=help_text, justify="left").pack(anchor="w")
@@ -778,6 +743,75 @@ def _run_gui() -> int:
             )
             self.status_var.set("Keybind window opened.")
 
+        def open_ducking_window(self) -> None:
+            if self.ducking_window is not None and self.ducking_window.winfo_exists():
+                self.ducking_window.deiconify()
+                self.ducking_window.update_idletasks()
+                self.ducking_window.lift()
+                self.ducking_window.focus_set()
+                self.status_var.set("Ducking window opened.")
+                return
+
+            window = tk.Toplevel(self.root)
+            window.title("Ducking")
+            window.geometry("420x180")
+            window.protocol("WM_DELETE_WINDOW", self.close_ducking_window)
+            window.update_idletasks()
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            self.ducking_window = window
+
+            frame = ttk.Frame(window, padding=12)
+            frame.pack(fill="both", expand=True)
+
+            ttk.Checkbutton(
+                frame,
+                text="Enable ducking while mic is active",
+                variable=self.ducking_enabled_var,
+                command=self.toggle_ducking,
+            ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+            ttk.Label(frame, text="Trigger Input").grid(row=1, column=0, sticky="w", pady=(12, 0))
+            ducking_source_combo = ttk.Combobox(
+                frame,
+                textvariable=self.ducking_source_var,
+                state="readonly",
+                values=["Hardware In 1", "Hardware In 2"],
+                width=18,
+            )
+            ducking_source_combo.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(12, 0))
+            ducking_source_combo.bind("<<ComboboxSelected>>", lambda _event: self._ducking_source_changed())
+
+            ttk.Label(frame, text="Duck Amount %").grid(row=2, column=0, sticky="w", pady=(12, 0))
+            ttk.Spinbox(
+                frame,
+                from_=5,
+                to=90,
+                textvariable=self.ducking_amount_var,
+                width=6,
+                command=self._update_ducking_config,
+            ).grid(row=2, column=1, sticky="w", padx=(12, 0), pady=(12, 0))
+
+            ttk.Label(frame, text="Threshold %").grid(row=3, column=0, sticky="w", pady=(12, 0))
+            ttk.Spinbox(
+                frame,
+                from_=1,
+                to=60,
+                textvariable=self.ducking_threshold_var,
+                width=6,
+                command=self._update_ducking_config,
+            ).grid(row=3, column=1, sticky="w", padx=(12, 0), pady=(12, 0))
+
+            ttk.Label(
+                frame,
+                text="Ducking lowers System Playback, Input 1, and Input 2 while the chosen mic is active.",
+                justify="left",
+                wraplength=380,
+            ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(16, 0))
+
+            self.status_var.set("Ducking window opened.")
+
         def close_keybind_window(self) -> None:
             self.key_capture_target = None
             if hasattr(self, "volume_step_var") and hasattr(self, "volume_step_trace_id"):
@@ -788,6 +822,11 @@ def _run_gui() -> int:
             if self.keybind_window is not None and self.keybind_window.winfo_exists():
                 self.keybind_window.destroy()
             self.keybind_window = None
+
+        def close_ducking_window(self) -> None:
+            if self.ducking_window is not None and self.ducking_window.winfo_exists():
+                self.ducking_window.destroy()
+            self.ducking_window = None
 
         def begin_key_capture(self, capture_type: str, target_key: str) -> None:
             self.key_capture_target = (capture_type, target_key)
@@ -1223,6 +1262,7 @@ def _run_gui() -> int:
 
         def close(self) -> None:
             self.close_keybind_window()
+            self.close_ducking_window()
             self._stop_ducking_monitor()
             self._stop_command_server()
             self.root.destroy()
