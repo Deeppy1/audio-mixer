@@ -10,7 +10,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from .models import RouteTargetSelection, RoutingMatrix, SinkInfo, SourceInfo, VirtualDeviceSpec
+from .models import AppStreamInfo, RouteTargetSelection, RoutingMatrix, SinkInfo, SourceInfo, VirtualDeviceSpec
 
 
 class AudioBackendError(RuntimeError):
@@ -30,6 +30,7 @@ class PactlBackend:
         "B1": "bus_b1",
         "B2": "bus_b2",
     }
+    APP_ASSIGNABLE_SOURCE_KEYS = ("system_playback", "virtual_input_1", "virtual_input_2")
 
     def __init__(self, state_path: Path | None = None, config_path: Path | None = None) -> None:
         self.state_path = state_path or Path(".mixer-state.json")
@@ -45,6 +46,11 @@ class PactlBackend:
         sinks = {sink.name for sink in self.list_sinks()}
         created: list[str] = []
         state = self._load_state()
+        state.setdefault("virtual_modules", {})
+        state.setdefault("virtual_source_modules", {})
+        state.setdefault("normalize_modules", [])
+        state.setdefault("loopback_modules", [])
+        state.setdefault("routing", {})
 
         for spec in self.VIRTUAL_DEVICES:
             if spec.sink_name in sinks:
@@ -190,6 +196,7 @@ class PactlBackend:
             "selection_keybinds": existing_config.get("selection_keybinds", {}),
             "volume_keybinds": existing_config.get("volume_keybinds", {}),
             "ducking": existing_config.get("ducking", {}),
+            "app_assignments": existing_config.get("app_assignments", {}),
         }
         self._write_config(payload)
 
@@ -246,6 +253,76 @@ class PactlBackend:
         config["ducking"] = ducking
         self._write_config(config)
 
+    def save_app_assignments(self, assignments: dict[str, str]) -> None:
+        config = self.load_config()
+        config["app_assignments"] = assignments
+        self._write_config(config)
+
+    def list_app_streams(self) -> list[AppStreamInfo]:
+        streams: list[AppStreamInfo] = []
+        sink_lookup = {sink.index: sink.name for sink in self.list_sinks() if sink.index >= 0}
+        for entry in self._list_sink_inputs():
+            props = entry.get("properties", {})
+            if props.get("application.name") == "AudioMixerMVP":
+                continue
+
+            stream_id = entry.get("index")
+            if stream_id is None:
+                continue
+
+            app_name = str(
+                props.get("application.name")
+                or props.get("application.process.binary")
+                or props.get("media.name")
+                or f"Stream {stream_id}"
+            )
+            app_id = str(
+                props.get("application.process.binary")
+                or props.get("application.name")
+                or props.get("media.name")
+                or f"stream-{stream_id}"
+            ).strip()
+            if not app_id:
+                app_id = f"stream-{stream_id}"
+
+            stream_name = str(props.get("media.name") or props.get("node.name") or app_name)
+            sink_name = self._sink_name_from_entry(entry, sink_lookup)
+            streams.append(
+                AppStreamInfo(
+                    stream_id=int(stream_id),
+                    app_id=app_id,
+                    app_name=app_name,
+                    stream_name=stream_name,
+                    sink_name=sink_name,
+                )
+            )
+        streams.sort(key=lambda stream: (stream.app_name.lower(), stream.stream_name.lower(), stream.stream_id))
+        return streams
+
+    def move_app_stream_to_sink(self, stream_id: int, sink_name: str) -> None:
+        self.ensure_virtual_devices()
+        if not sink_name:
+            raise AudioBackendError("Unknown app assignment target.")
+        self._run(["pactl", "move-sink-input", str(stream_id), sink_name])
+
+    def apply_app_assignments(self, assignments: dict[str, str] | None = None) -> int:
+        if assignments is None:
+            assignments = self.load_config().get("app_assignments", {})
+        if not assignments:
+            return 0
+
+        moved = 0
+        for stream in self.list_app_streams():
+            target_value = assignments.get(stream.app_id, "")
+            target_sink = self._normalize_app_assignment_target(target_value)
+            if not target_sink:
+                continue
+            if stream.sink_name == target_sink:
+                continue
+            self._run(["pactl", "move-sink-input", str(stream.stream_id), target_sink])
+            moved += 1
+        return moved
+
     def _strip_volume_percent(self, strip_settings: dict[str, dict] | None, source_key: str) -> int:
         if not strip_settings:
             return 100
@@ -270,7 +347,27 @@ class PactlBackend:
                 return spec.sink_name
         return ""
 
+    def _sink_name_for_app_source(self, source_key: str) -> str:
+        for spec in self.VIRTUAL_DEVICES:
+            if spec.key == source_key:
+                return spec.sink_name
+        return ""
+
+    def _normalize_app_assignment_target(self, value: str) -> str:
+        if not value:
+            return ""
+        if value in self.APP_ASSIGNABLE_SOURCE_KEYS:
+            return self._sink_name_for_app_source(value)
+        for sink in self.list_sinks():
+            if sink.name == value:
+                return sink.name
+        return ""
+
     def _parse_short_list(self, noun: str, model_cls: type[SinkInfo] | type[SourceInfo]):
+        if noun == "sinks":
+            parsed_sinks = self._parse_sinks_json()
+            if parsed_sinks:
+                return parsed_sinks
         if noun == "sources":
             parsed_sources = self._parse_sources_json()
             if parsed_sources:
@@ -283,7 +380,44 @@ class PactlBackend:
                 continue
             name = parts[1].strip()
             description = parts[1].strip()
-            items.append(model_cls(name=name, description=description))
+            if model_cls is SinkInfo:
+                try:
+                    index = int(parts[0].strip())
+                except ValueError:
+                    index = -1
+                items.append(model_cls(name=name, description=description, index=index))
+            else:
+                items.append(model_cls(name=name, description=description))
+        return items
+
+    def _parse_sinks_json(self) -> list[SinkInfo]:
+        try:
+            output = self._run(["pactl", "-f", "json", "list", "sinks"])
+        except AudioBackendError:
+            return []
+        if not output:
+            return []
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError:
+            return []
+
+        items: list[SinkInfo] = []
+        for entry in payload:
+            props = entry.get("properties", {})
+            description = str(
+                props.get("device.description")
+                or props.get("node.description")
+                or entry.get("description")
+                or entry.get("name", "")
+            )
+            items.append(
+                SinkInfo(
+                    name=entry.get("name", ""),
+                    description=description,
+                    index=int(entry.get("index", -1) or -1),
+                )
+            )
         return items
 
     def _parse_sources_json(self) -> list[SourceInfo]:
@@ -328,6 +462,24 @@ class PactlBackend:
         if isinstance(payload, list):
             return payload
         return []
+
+    def _sink_name_from_entry(self, entry: dict, sink_lookup: dict[int, str] | None = None) -> str:
+        sink = entry.get("sink", "")
+        if isinstance(sink, dict):
+            name = sink.get("name")
+            if isinstance(name, str):
+                return name
+            index = sink.get("index")
+            if sink_lookup and isinstance(index, int):
+                return sink_lookup.get(index, "")
+        if isinstance(sink, str):
+            return sink
+        if isinstance(sink, int) and sink_lookup:
+            return sink_lookup.get(sink, "")
+        sink_name = entry.get("sink_name")
+        if isinstance(sink_name, str):
+            return sink_name
+        return ""
 
     def _load_null_sink(self, spec: VirtualDeviceSpec) -> int:
         args = [
@@ -430,16 +582,30 @@ class PactlBackend:
                 continue
 
     def _load_state(self) -> dict:
+        default_state = {
+            "virtual_modules": {},
+            "virtual_source_modules": {},
+            "normalize_modules": [],
+            "loopback_modules": [],
+            "routing": {},
+        }
         if not self.state_path.exists():
-            return {
-                "virtual_modules": {},
-                "virtual_source_modules": {},
-                "normalize_modules": [],
-                "loopback_modules": [],
-                "routing": {},
-            }
+            return default_state
         with self.state_path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+            loaded_state = json.load(handle)
+
+        if not isinstance(loaded_state, dict):
+            return default_state
+
+        state = dict(default_state)
+        state.update(loaded_state)
+        for key in ("virtual_modules", "virtual_source_modules", "routing"):
+            if not isinstance(state.get(key), dict):
+                state[key] = dict(default_state[key])
+        for key in ("normalize_modules", "loopback_modules"):
+            if not isinstance(state.get(key), list):
+                state[key] = list(default_state[key])
+        return state
 
     def _save_state(self, state: dict) -> None:
         with self.state_path.open("w", encoding="utf-8") as handle:

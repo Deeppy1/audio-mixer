@@ -31,7 +31,9 @@ It does **not** implement a custom driver. It builds on PipeWire or PulseAudio v
 - Output test buttons and input preview test buttons
 - Editable strip labels in the GUI
 - Per-strip mute in the GUI
+- Per-strip solo in the GUI
 - Per-strip volume faders in the GUI
+- Per-app playback stream assignment to `VM_System`, `VM_Input_1`, or `VM_Input_2` from the `Apps` window
 - Optional mic-triggered ducking for `System Playback`, `Input 1`, and `Input 2`
 - Keyboard shortcuts to select a specific strip fader in the GUI, configured from a dedicated keybinds window
 - Saved config in `mixer-config.json`
@@ -196,6 +198,7 @@ Then assign apps:
 - set Discord playback to `VM_Input_1`
 - set Spotify playback to `VM_Input_2`
 - set Discord or OBS input to `VM_Output_B1` if you want to capture bus `B1`
+- open `Apps` to move active playback streams to `System Playback`, `Input 1`, or `Input 2` and save per-app assignment rules
 
 ## Config and persistence
 
@@ -206,7 +209,9 @@ When you click `Apply Routing`, the app saves:
 - route matrix state
 - custom strip labels
 - strip mute state
+- strip solo state
 - strip volume levels
+- saved per-app routing rules
 
 Notes:
 
@@ -215,6 +220,7 @@ Notes:
 - The same window can also bind `Selected Fader Up` and `Selected Fader Down` shortcuts, with a configurable step size
 - The running GUI exposes a local control socket at `/tmp/audio-mixer-control.sock` so external tools such as Hyprland can drive strip selection and volume
 - The `Ducking` section can monitor `Hardware In 1` or `Hardware In 2` and temporarily lower `System Playback`, `Input 1`, and `Input 2` while you speak
+- The `Apps` window can move active playback streams into `System Playback`, `Input 1`, or `Input 2`, shows the current sink, and remembers saved rules by app identity
 
 Saved file:
 
@@ -252,16 +258,12 @@ pactl -f json list sources
 - Linux only
 - No EQ, compression, gate, or effects
 - No true per-strip gain sliders yet
-- No solo yet
-- No per-app assignment UI inside the app
 - Routing is restored by reopening the app or running `apply-saved`, not by a background daemon
 - Uses `module-loopback`, so latency depends on your PipeWire/PulseAudio setup
 
 ## Next useful upgrades
 
 - real per-strip gain sliders
-- solo controls
 - auto-start restoration
-- per-app stream assignment inside the UI
 - better live metering
 - JACK / PipeWire graph inspection

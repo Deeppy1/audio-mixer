@@ -252,6 +252,11 @@ def _run_gui() -> int:
     class MixerApp:
         ROUTE_TARGETS = ("A1", "A2", "B1", "B2")
         DUCKED_SOURCE_KEYS = ("system_playback", "virtual_input_1", "virtual_input_2")
+        APP_ASSIGNMENT_LABELS = {
+            "system_playback": "System Playback",
+            "virtual_input_1": "Input 1",
+            "virtual_input_2": "Input 2",
+        }
 
         def __init__(self, root: tk.Tk) -> None:
             self.root = root
@@ -288,6 +293,10 @@ def _run_gui() -> int:
                 source_key: tk.BooleanVar(value=False)
                 for source_key, _label in self.route_rows
             }
+            self.strip_solo_vars = {
+                source_key: tk.BooleanVar(value=False)
+                for source_key, _label in self.route_rows
+            }
             self.strip_volume_vars = {
                 source_key: tk.IntVar(value=100)
                 for source_key, _label in self.route_rows
@@ -311,6 +320,9 @@ def _run_gui() -> int:
             self.loading_config = False
             self.keybind_window: tk.Toplevel | None = None
             self.ducking_window: tk.Toplevel | None = None
+            self.apps_window: tk.Toplevel | None = None
+            self.apps_content_frame = None
+            self.app_assignments: dict[str, str] = {}
             self.keybind_value_vars: dict[str, tk.StringVar] = {}
             self.key_capture_target: tuple[str, str] | None = None
             self.command_server_socket: socket.socket | None = None
@@ -348,6 +360,7 @@ def _run_gui() -> int:
             ttk.Button(control_bar, text="Set Desktop To VM_System", command=self.set_default_system).pack(
                 side="left", padx=8
             )
+            ttk.Button(control_bar, text="Apps", command=self.open_apps_window).pack(side="left", padx=(8, 0))
             ttk.Button(control_bar, text="Keybinds", command=self.open_keybind_window).pack(side="left")
             ttk.Button(control_bar, text="Ducking", command=self.open_ducking_window).pack(side="left", padx=(8, 0))
 
@@ -390,9 +403,10 @@ def _run_gui() -> int:
 
             ttk.Label(matrix_frame, text="Source").grid(row=0, column=0, sticky="w", padx=(0, 16))
             ttk.Label(matrix_frame, text="Mute").grid(row=0, column=1, padx=12)
-            ttk.Label(matrix_frame, text="Vol").grid(row=0, column=2, padx=12)
+            ttk.Label(matrix_frame, text="Solo").grid(row=0, column=2, padx=12)
+            ttk.Label(matrix_frame, text="Vol").grid(row=0, column=3, padx=12)
             for index, target in enumerate(self.ROUTE_TARGETS, start=1):
-                ttk.Label(matrix_frame, text=target).grid(row=0, column=index + 2, padx=12)
+                ttk.Label(matrix_frame, text=target).grid(row=0, column=index + 3, padx=12)
 
             for row_index, (source_key, label) in enumerate(self.route_rows, start=1):
                 label_entry = ttk.Entry(
@@ -408,6 +422,12 @@ def _run_gui() -> int:
                     column=1,
                 )
                 mute_box.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+                solo_box = ttk.Checkbutton(matrix_frame, variable=self.strip_solo_vars[source_key])
+                solo_box.grid(
+                    row=row_index,
+                    column=2,
+                )
+                solo_box.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
                 volume_scale = ttk.Scale(
                     matrix_frame,
                     from_=0,
@@ -415,18 +435,18 @@ def _run_gui() -> int:
                     orient="horizontal",
                     variable=self.strip_volume_vars[source_key],
                 )
-                volume_scale.grid(row=row_index, column=2, sticky="ew", padx=(8, 8))
+                volume_scale.grid(row=row_index, column=3, sticky="ew", padx=(8, 8))
                 volume_scale.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
                 self.route_vars[source_key] = {}
                 for col_index, target in enumerate(self.ROUTE_TARGETS, start=1):
                     variable = tk.BooleanVar(value=target in ("A1", "B1") and row_index == 1)
                     self.route_vars[source_key][target] = variable
                     route_box = ttk.Checkbutton(matrix_frame, variable=variable)
-                    route_box.grid(row=row_index, column=col_index + 2)
+                    route_box.grid(row=row_index, column=col_index + 3)
                     route_box.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
             matrix_frame.columnconfigure(0, weight=1)
-            matrix_frame.columnconfigure(2, weight=1)
+            matrix_frame.columnconfigure(3, weight=1)
 
             selected_strip_frame = ttk.Frame(top)
             selected_strip_frame.pack(fill="x", pady=(8, 0))
@@ -638,6 +658,33 @@ def _run_gui() -> int:
             amount = max(5, min(90, int(self.ducking_amount_var.get() or 35)))
             return max(0, min(150, int(round(base_volume * (100 - amount) / 100))))
 
+        def _app_assignment_source_key_to_label(self, source_key: str) -> str:
+            return self.APP_ASSIGNMENT_LABELS.get(source_key, "")
+
+        def _app_assignment_label_to_source_key(self, label: str) -> str:
+            for source_key, source_label in self.APP_ASSIGNMENT_LABELS.items():
+                if source_label == label:
+                    return source_key
+            return ""
+
+        def _current_app_sink_label(self, sink_name: str) -> str:
+            sink_labels = {
+                "vm_system": "System Playback",
+                "vm_input_1": "Input 1",
+                "vm_input_2": "Input 2",
+            }
+            return sink_labels.get(sink_name, sink_name)
+
+        def _has_active_solo(self) -> bool:
+            return any(variable.get() for variable in self.strip_solo_vars.values())
+
+        def _route_enabled_for_strip(self, source_key: str, target_key: str) -> bool:
+            if self.strip_mute_vars[source_key].get():
+                return False
+            if self._has_active_solo() and not self.strip_solo_vars[source_key].get():
+                return False
+            return self.route_vars[source_key][target_key].get()
+
         def _apply_ducking_state(self, active: bool) -> None:
             self.ducking_active = active and bool(self.ducking_enabled_var.get())
             for source_key in self.DUCKED_SOURCE_KEYS:
@@ -812,6 +859,99 @@ def _run_gui() -> int:
 
             self.status_var.set("Ducking window opened.")
 
+        def open_apps_window(self) -> None:
+            if self.apps_window is not None and self.apps_window.winfo_exists():
+                self.apps_window.deiconify()
+                self.apps_window.update_idletasks()
+                self.apps_window.lift()
+                self.apps_window.focus_set()
+                self.refresh_apps_window()
+                self.status_var.set("Apps window opened.")
+                return
+
+            window = tk.Toplevel(self.root)
+            window.title("Apps")
+            window.geometry("860x420")
+            window.protocol("WM_DELETE_WINDOW", self.close_apps_window)
+            window.update_idletasks()
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            self.apps_window = window
+
+            outer = ttk.Frame(window, padding=12)
+            outer.pack(fill="both", expand=True)
+
+            controls = ttk.Frame(outer)
+            controls.pack(fill="x")
+            ttk.Button(controls, text="Refresh", command=self.refresh_apps_window).pack(side="left")
+            ttk.Button(controls, text="Apply Saved Rules", command=self.apply_saved_app_assignments).pack(
+                side="left", padx=(8, 0)
+            )
+
+            self.apps_content_frame = ttk.Frame(outer)
+            self.apps_content_frame.pack(fill="both", expand=True, pady=(12, 0))
+            self.refresh_apps_window()
+            self.status_var.set("Apps window opened.")
+
+        def refresh_apps_window(self) -> None:
+            if self.apps_content_frame is None:
+                return
+            for child in self.apps_content_frame.winfo_children():
+                child.destroy()
+
+            try:
+                streams = self.backend.list_app_streams()
+            except AudioBackendError as exc:
+                ttk.Label(self.apps_content_frame, text=str(exc), justify="left").pack(anchor="w")
+                self.status_var.set(str(exc))
+                return
+
+            header = ttk.Frame(self.apps_content_frame)
+            header.pack(fill="x")
+            ttk.Label(header, text="App", width=22).grid(row=0, column=0, sticky="w")
+            ttk.Label(header, text="Stream", width=28).grid(row=0, column=1, sticky="w", padx=(12, 0))
+            ttk.Label(header, text="Current Sink", width=34).grid(row=0, column=2, sticky="w", padx=(12, 0))
+            ttk.Label(header, text="Assign To", width=18).grid(row=0, column=3, sticky="w", padx=(12, 0))
+
+            if not streams:
+                ttk.Label(
+                    self.apps_content_frame,
+                    text="No active playback app streams found.",
+                    justify="left",
+                ).pack(anchor="w", pady=(12, 0))
+                return
+
+            options = list(self.APP_ASSIGNMENT_LABELS.values())
+            for stream in streams:
+                row = ttk.Frame(self.apps_content_frame)
+                row.pack(fill="x", pady=(8, 0))
+
+                assignment_value = self._app_assignment_source_key_to_label(self.app_assignments.get(stream.app_id, ""))
+                if not assignment_value:
+                    assignment_value = self._current_app_sink_label(stream.sink_name)
+                assignment_var = tk.StringVar(value=assignment_value)
+
+                ttk.Label(row, text=stream.app_name, width=22).grid(row=0, column=0, sticky="w")
+                ttk.Label(row, text=stream.stream_name, width=28).grid(row=0, column=1, sticky="w", padx=(12, 0))
+                ttk.Label(
+                    row,
+                    text=self._current_app_sink_label(stream.sink_name) or "unknown",
+                    width=34,
+                ).grid(row=0, column=2, sticky="w", padx=(12, 0))
+                combo = ttk.Combobox(row, textvariable=assignment_var, values=options, state="readonly", width=16)
+                combo.grid(row=0, column=3, sticky="w", padx=(12, 0))
+                ttk.Button(
+                    row,
+                    text="Assign",
+                    command=lambda stream=stream, assignment_var=assignment_var: self.assign_app_stream(stream, assignment_var),
+                ).grid(row=0, column=4, padx=(12, 0))
+                ttk.Button(
+                    row,
+                    text="Clear Rule",
+                    command=lambda app_id=stream.app_id: self.clear_app_assignment(app_id),
+                ).grid(row=0, column=5, padx=(8, 0))
+
         def close_keybind_window(self) -> None:
             self.key_capture_target = None
             if hasattr(self, "volume_step_var") and hasattr(self, "volume_step_trace_id"):
@@ -827,6 +967,47 @@ def _run_gui() -> int:
             if self.ducking_window is not None and self.ducking_window.winfo_exists():
                 self.ducking_window.destroy()
             self.ducking_window = None
+
+        def close_apps_window(self) -> None:
+            if self.apps_window is not None and self.apps_window.winfo_exists():
+                self.apps_window.destroy()
+            self.apps_window = None
+            self.apps_content_frame = None
+
+        def assign_app_stream(self, stream, assignment_var) -> None:
+            source_key = self._app_assignment_label_to_source_key(assignment_var.get())
+            if not source_key:
+                self.status_var.set("Select an app target first.")
+                return
+            try:
+                self.backend.move_app_stream_to_sink(
+                    stream.stream_id,
+                    self.backend._normalize_app_assignment_target(source_key),
+                )
+                self.app_assignments[stream.app_id] = source_key
+                self.backend.save_app_assignments(self.app_assignments)
+            except AudioBackendError as exc:
+                self._show_backend_error(str(exc))
+                return
+            self.status_var.set(f"Assigned {stream.app_name} to {assignment_var.get()}")
+            self.refresh_apps_window()
+
+        def clear_app_assignment(self, app_id: str) -> None:
+            if app_id in self.app_assignments:
+                self.app_assignments.pop(app_id, None)
+                self.backend.save_app_assignments(self.app_assignments)
+            self.status_var.set(f"Cleared saved app rule for {app_id}")
+            self.refresh_apps_window()
+
+        def apply_saved_app_assignments(self) -> None:
+            try:
+                moved = self.backend.apply_app_assignments(self.app_assignments)
+            except AudioBackendError as exc:
+                self._show_backend_error(str(exc))
+                return
+            self.status_var.set(f"Applied app rules to {moved} stream(s)")
+            if self.apps_window is not None and self.apps_window.winfo_exists():
+                self.refresh_apps_window()
 
         def begin_key_capture(self, capture_type: str, target_key: str) -> None:
             self.key_capture_target = (capture_type, target_key)
@@ -1052,6 +1233,11 @@ def _run_gui() -> int:
             saved_selection_keybinds = config.get("selection_keybinds", {})
             saved_volume_keybinds = config.get("volume_keybinds", {})
             ducking = config.get("ducking", {})
+            self.app_assignments = {
+                app_id: str(target_value)
+                for app_id, target_value in config.get("app_assignments", {}).items()
+                if self.backend._normalize_app_assignment_target(str(target_value))
+            }
 
             if targets.get("a1_sink") in self.sinks:
                 self.a1_var.set(targets["a1_sink"])
@@ -1076,6 +1262,8 @@ def _run_gui() -> int:
                         self.strip_label_vars[source_key].set(label)
                 if source_key in self.strip_mute_vars:
                     self.strip_mute_vars[source_key].set(bool(settings.get("muted", False)))
+                if source_key in self.strip_solo_vars:
+                    self.strip_solo_vars[source_key].set(bool(settings.get("solo", False)))
                 if source_key in self.strip_volume_vars:
                     volume = settings.get("volume_percent", 100)
                     try:
@@ -1111,6 +1299,11 @@ def _run_gui() -> int:
                 self.ducking_threshold_var.set(10)
             if self.ducking_enabled_var.get():
                 self._start_ducking_monitor()
+            if self.app_assignments:
+                try:
+                    self.backend.apply_app_assignments(self.app_assignments)
+                except AudioBackendError as exc:
+                    self.status_var.set(str(exc))
 
         def create_virtual_devices(self) -> None:
             try:
@@ -1148,10 +1341,9 @@ def _run_gui() -> int:
 
             matrix_data = {}
             for source_key, targets in self.route_vars.items():
-                muted = self.strip_mute_vars[source_key].get()
                 matrix_data[source_key] = {
-                    target_key: (False if muted else variable.get())
-                    for target_key, variable in targets.items()
+                    target_key: self._route_enabled_for_strip(source_key, target_key)
+                    for target_key in targets
                 }
             matrix = RoutingMatrix(routes=matrix_data)
             targets = RouteTargetSelection(a1_sink=self.a1_var.get(), a2_sink=self.a2_var.get())
@@ -1159,6 +1351,7 @@ def _run_gui() -> int:
                 source_key: {
                     "label": self.strip_label_vars[source_key].get().strip() or default_label,
                     "muted": self.strip_mute_vars[source_key].get(),
+                    "solo": self.strip_solo_vars[source_key].get(),
                     "volume_percent": self.strip_volume_vars[source_key].get(),
                 }
                 for source_key, default_label in self.route_rows
@@ -1166,6 +1359,12 @@ def _run_gui() -> int:
 
             try:
                 self.backend.apply_routing(source_map, matrix, targets, strip_settings=strip_settings)
+            except AudioBackendError as exc:
+                messagebox.showerror("Audio backend error", str(exc))
+                self.status_var.set(str(exc))
+                return
+            try:
+                self.backend.apply_app_assignments(self.app_assignments)
             except AudioBackendError as exc:
                 messagebox.showerror("Audio backend error", str(exc))
                 self.status_var.set(str(exc))
@@ -1263,6 +1462,7 @@ def _run_gui() -> int:
         def close(self) -> None:
             self.close_keybind_window()
             self.close_ducking_window()
+            self.close_apps_window()
             self._stop_ducking_monitor()
             self._stop_command_server()
             self.root.destroy()

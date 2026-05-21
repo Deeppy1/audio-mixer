@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 class SinkInfo:
     name: str
     description: str
+    index: int = -1
 
 
 @dataclass
@@ -15,6 +16,15 @@ class SourceInfo:
     description: str
     channels: int = 0
     channel_map: str = ""
+
+
+@dataclass
+class AppStreamInfo:
+    stream_id: int
+    app_id: str
+    app_name: str
+    stream_name: str
+    sink_name: str
 
 
 @dataclass
