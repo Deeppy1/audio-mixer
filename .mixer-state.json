@@ -1,30 +1,30 @@
 {
   "loopback_modules": [
-    536870928,
     536870923,
     536870924,
-    536870925
+    536870925,
+    536870926
   ],
   "normalize_modules": [],
   "routing": {
     "active_loopbacks": [
       {
-        "module_id": 536870928,
+        "module_id": 536870923,
         "source_key": "hardware_input_1",
         "target_key": "B1"
       },
       {
-        "module_id": 536870923,
+        "module_id": 536870924,
         "source_key": "system_playback",
         "target_key": "A1"
       },
       {
-        "module_id": 536870924,
+        "module_id": 536870925,
         "source_key": "virtual_input_1",
         "target_key": "A1"
       },
       {
-        "module_id": 536870925,
+        "module_id": 536870926,
         "source_key": "virtual_input_2",
         "target_key": "A1"
       }
@@ -81,5 +81,6 @@
     "system_playback": 536870920,
     "virtual_input_1": 536870916,
     "virtual_input_2": 536870917
-  }
+  },
+  "virtual_source_modules": {}
 }

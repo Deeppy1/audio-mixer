@@ -1,9 +1,12 @@
 {
+  "app_assignments": {
+    "audio-src": "virtual_input_2"
+  },
   "controller_binding": {},
   "ducking": {
     "amount_percent": 60,
     "enabled": false,
-    "source": "Hardware In 2",
+    "source": "Hardware In 1",
     "threshold_percent": 10
   },
   "matrix": {
@@ -47,26 +50,31 @@
     "hardware_input_1": {
       "label": "Hardware In 1",
       "muted": false,
+      "solo": false,
       "volume_percent": 101
     },
     "hardware_input_2": {
       "label": "Webcam mic",
       "muted": false,
+      "solo": false,
       "volume_percent": 94
     },
     "system_playback": {
       "label": "System Playback",
       "muted": false,
+      "solo": false,
       "volume_percent": 87
     },
     "virtual_input_1": {
       "label": "Input 1",
       "muted": false,
+      "solo": false,
       "volume_percent": 95
     },
     "virtual_input_2": {
       "label": "Input 2",
       "muted": false,
+      "solo": false,
       "volume_percent": 95
     }
   },
