@@ -1,3 +1,3 @@
-version = "v0.1.5"
+version = "v0.1.6"
 
-# Version 0.1.5 21/5/26
+# Version 0.1.6 22/5/26
