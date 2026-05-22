@@ -3,6 +3,6 @@ from updatecheck import *
 from mixer.app import main
 
 if __name__ == "__main__":
-    updatecheck()
+    #updatecheck()
     #print(version)
     main()

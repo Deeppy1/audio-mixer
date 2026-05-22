@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 from version import version
+from updatecheck import *
 from .audio_backend import AudioBackendError, PactlBackend
 from .models import RouteTargetSelection, RoutingMatrix
 
@@ -39,7 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="SOURCE:TARGET",
         help="Enable a route such as hw1:A1, hw1:B1, vi1:A2, vi2:B2",
-    )
+    ) 
 
     output_test_parser = subparsers.add_parser("test-output", help="Play a short test tone to a sink")
     output_test_parser.add_argument("--sink", required=True, help="Sink name to test")
@@ -452,14 +453,15 @@ def _run_gui() -> int:
             selected_strip_frame.pack(fill="x", pady=(8, 0))
             ttk.Label(selected_strip_frame, text="Selected Fader").pack(side="left")
             ttk.Label(selected_strip_frame, textvariable=self.selected_strip_label_var).pack(side="left", padx=(8, 0))
-
+            
+            status = updatecheck()
             help_text = (
                 "VM_System is a dedicated playback device for general desktop audio.\n"
                 "VM_Input_1 and VM_Input_2 are extra playback devices for specific apps.\n"
                 "VM_Bus_B1 and VM_Bus_B2 expose monitor sources that other apps can record.\n"
                 "Click a strip to make it active, or configure selection shortcuts in Keybinds.\n"
                 "Open Ducking to lower System Playback, Input 1, and Input 2 while the selected mic is active.\n"
-                f"Version: {version}"
+                f"Version: {version} {status}"
             )
             ttk.Label(top, text=help_text, justify="left").pack(anchor="w")
 
