@@ -4,7 +4,7 @@ import re
 
 
 def extract_version(text):
-    match = re.search(r'v\d+\.\d+\.\d+', text)
+    match = re.search(r'v\d+(?:\.\d+)+', text)
 
     if match:
         return match.group(0)
@@ -14,6 +14,7 @@ def extract_version(text):
 
 def version_tuple(v):
     return tuple(map(int, v.lstrip("v").split(".")))
+
 
 def updatecheck():
     url = "https://raw.githubusercontent.com/Deeppy1/audio-mixer/main/version.py"
@@ -31,13 +32,10 @@ def updatecheck():
     remote = version_tuple(webversion)
 
     if local < remote:
-        print("You are behind")
         return "You are behind"
 
     elif local > remote:
-        print("You are ahead")
         return "You are ahead"
 
     else:
-        print("Up to date")
         return "Up to date"
