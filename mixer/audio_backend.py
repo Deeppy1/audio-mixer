@@ -4,6 +4,7 @@ import json
 import math
 import os
 import shlex
+import signal
 import struct
 import subprocess
 import time
@@ -78,38 +79,57 @@ class PactlBackend:
         matrix: RoutingMatrix,
         targets: RouteTargetSelection,
         strip_settings: dict[str, dict] | None = None,
+        eq_settings: dict[str, dict] | None = None,
     ) -> None:
         self.ensure_virtual_devices()
         state = self._load_state()
         self._unload_modules(state.get("normalize_modules", []))
         self._unload_modules(state.get("loopback_modules", []))
+        self._stop_eq_bridge_processes(state.get("eq_bridge_processes", []))
 
         normalized_source_map, normalize_modules = self._normalize_source_map(source_map)
         loopbacks: list[int] = []
-        active_loopbacks: list[dict[str, int | str]] = []
+        eq_bridge_processes: list[dict[str, int | str]] = []
+        active_routes: list[dict[str, int | str]] = []
+        eq_settings = eq_settings or self.load_config().get("eq_settings", {})
         for source_key, target_key in matrix.enabled_pairs():
             source_name = normalized_source_map.get(source_key, "")
             sink_name = self._resolve_target_sink(target_key, targets)
             if not source_name or not sink_name:
                 continue
+            strip_volume = self._strip_volume_percent(strip_settings, source_key)
+            eq_state = eq_settings.get(source_key, {})
+            if self._eq_enabled(eq_state):
+                bridge_process = self._start_eq_bridge(source_name, sink_name, source_key, target_key, eq_state)
+                eq_bridge_processes.append(bridge_process)
+                active_routes.append(bridge_process)
+                sink_input_id = self._find_sink_input_by_properties(
+                    application_name=str(bridge_process["application_name"]),
+                    media_name=str(bridge_process["stream_name"]),
+                )
+                if sink_input_id is not None:
+                    self._set_sink_input_volume(sink_input_id, strip_volume)
+                continue
+
             loopback_module_id = self._load_loopback(source_name, sink_name, source_key, target_key)
             loopbacks.append(loopback_module_id)
-            active_loopbacks.append(
-                {
-                    "module_id": loopback_module_id,
-                    "source_key": source_key,
-                    "target_key": target_key,
-                }
-            )
-            strip_volume = self._strip_volume_percent(strip_settings, source_key)
+            route = {
+                "type": "loopback",
+                "module_id": loopback_module_id,
+                "source_key": source_key,
+                "target_key": target_key,
+            }
+            active_routes.append(route)
             sink_input_id = self._find_loopback_sink_input_id(loopback_module_id)
             if sink_input_id is not None:
                 self._set_sink_input_volume(sink_input_id, strip_volume)
 
         state["normalize_modules"] = normalize_modules
         state["loopback_modules"] = loopbacks
+        state["eq_bridge_processes"] = eq_bridge_processes
         state["routing"] = {
-            "active_loopbacks": active_loopbacks,
+            "active_routes": active_routes,
+            "active_loopbacks": [route for route in active_routes if route.get("type") == "loopback"],
             "source_map": source_map,
             "targets": asdict(targets),
             "matrix": matrix.routes,
@@ -197,6 +217,7 @@ class PactlBackend:
             "volume_keybinds": existing_config.get("volume_keybinds", {}),
             "ducking": existing_config.get("ducking", {}),
             "app_assignments": existing_config.get("app_assignments", {}),
+            "eq_settings": existing_config.get("eq_settings", {}),
         }
         self._write_config(payload)
 
@@ -215,14 +236,24 @@ class PactlBackend:
     def _set_strip_volume(self, source_key: str, volume_percent: int, persist: bool) -> int:
         volume = max(0, min(150, int(round(volume_percent))))
         state = self._load_state()
-        active_loopbacks = state.get("routing", {}).get("active_loopbacks", [])
-        for loopback in active_loopbacks:
-            if loopback.get("source_key") != source_key:
+        active_routes = state.get("routing", {}).get("active_routes", [])
+        if not isinstance(active_routes, list) or not active_routes:
+            active_routes = state.get("routing", {}).get("active_loopbacks", [])
+        for route in active_routes:
+            if route.get("source_key") != source_key:
                 continue
-            module_id = int(loopback.get("module_id", -1))
-            if module_id < 0:
-                continue
-            sink_input_id = self._find_loopback_sink_input_id(module_id, attempts=4, delay_seconds=0.02)
+            sink_input_id = None
+            if route.get("type") == "eq_bridge":
+                sink_input_id = self._find_sink_input_by_properties(
+                    application_name=str(route.get("application_name", "")),
+                    media_name=str(route.get("stream_name", "")),
+                    attempts=4,
+                    delay_seconds=0.02,
+                )
+            else:
+                module_id = int(route.get("module_id", -1))
+                if module_id >= 0:
+                    sink_input_id = self._find_loopback_sink_input_id(module_id, attempts=4, delay_seconds=0.02)
             if sink_input_id is not None:
                 self._set_sink_input_volume(sink_input_id, volume)
         if persist:
@@ -256,6 +287,11 @@ class PactlBackend:
     def save_app_assignments(self, assignments: dict[str, str]) -> None:
         config = self.load_config()
         config["app_assignments"] = assignments
+        self._write_config(config)
+
+    def save_eq_settings(self, eq_settings: dict[str, dict]) -> None:
+        config = self.load_config()
+        config["eq_settings"] = eq_settings
         self._write_config(config)
 
     def list_app_streams(self) -> list[AppStreamInfo]:
@@ -571,6 +607,27 @@ class PactlBackend:
             time.sleep(delay_seconds)
         return None
 
+    def _find_sink_input_by_properties(
+        self,
+        application_name: str,
+        media_name: str,
+        attempts: int = 20,
+        delay_seconds: float = 0.05,
+    ) -> int | None:
+        for _ in range(attempts):
+            for sink_input in self._list_sink_inputs():
+                props = sink_input.get("properties", {})
+                if props.get("application.name") != application_name:
+                    continue
+                if media_name and props.get("media.name") != media_name:
+                    continue
+                sink_input_id = sink_input.get("index")
+                if sink_input_id is None:
+                    continue
+                return int(sink_input_id)
+            time.sleep(delay_seconds)
+        return None
+
     def _set_sink_input_volume(self, sink_input_id: int, volume_percent: int) -> None:
         self._run(["pactl", "set-sink-input-volume", str(sink_input_id), f"{volume_percent}%"])
 
@@ -587,6 +644,7 @@ class PactlBackend:
             "virtual_source_modules": {},
             "normalize_modules": [],
             "loopback_modules": [],
+            "eq_bridge_processes": [],
             "routing": {},
         }
         if not self.state_path.exists():
@@ -602,7 +660,7 @@ class PactlBackend:
         for key in ("virtual_modules", "virtual_source_modules", "routing"):
             if not isinstance(state.get(key), dict):
                 state[key] = dict(default_state[key])
-        for key in ("normalize_modules", "loopback_modules"):
+        for key in ("normalize_modules", "loopback_modules", "eq_bridge_processes"):
             if not isinstance(state.get(key), list):
                 state[key] = list(default_state[key])
         return state
@@ -638,6 +696,139 @@ class PactlBackend:
         normalized_name = f"amx_{suffix}_stereo"
         module_id = self._load_stereo_remap_source(source_name, normalized_name, master_channel)
         return normalized_name, module_id
+
+    def _eq_enabled(self, eq_state: dict) -> bool:
+        if not isinstance(eq_state, dict):
+            return False
+        if bool(eq_state.get("bypass", False)):
+            return False
+        bands = eq_state.get("bands", [])
+        if not isinstance(bands, list):
+            return False
+        for band in bands:
+            if not isinstance(band, dict):
+                continue
+            if not bool(band.get("enabled", True)):
+                continue
+            try:
+                gain_db = float(band.get("gain_db", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if abs(gain_db) >= 0.05:
+                return True
+        return False
+
+    def _start_eq_bridge(
+        self,
+        source_name: str,
+        sink_name: str,
+        source_key: str,
+        target_key: str,
+        eq_state: dict,
+    ) -> dict[str, int | str]:
+        application_name = "AudioMixerEQ"
+        stream_name = f"{source_key}_to_{target_key}_eq"
+        filter_chain = self._build_ffmpeg_eq_filter(eq_state)
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-thread_queue_size",
+            "1024",
+            "-f",
+            "pulse",
+            "-name",
+            application_name,
+            "-stream_name",
+            f"{source_key}_capture_eq",
+            "-sample_rate",
+            "48000",
+            "-channels",
+            "2",
+            "-fragment_size",
+            "4096",
+            "-i",
+            source_name,
+            "-af",
+            filter_chain,
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-f",
+            "pulse",
+            "-name",
+            application_name,
+            "-stream_name",
+            stream_name,
+            "-buffer_duration",
+            "20",
+            "-device",
+            sink_name,
+            sink_name,
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=os.environ.copy(),
+            start_new_session=True,
+        )
+        return {
+            "type": "eq_bridge",
+            "pid": process.pid,
+            "source_key": source_key,
+            "target_key": target_key,
+            "source_name": source_name,
+            "sink_name": sink_name,
+            "application_name": application_name,
+            "stream_name": stream_name,
+        }
+
+    def _build_ffmpeg_eq_filter(self, eq_state: dict) -> str:
+        bands = eq_state.get("bands", []) if isinstance(eq_state, dict) else []
+        if not isinstance(bands, list) or not bands:
+            return "anull"
+
+        filters: list[str] = []
+        for index, band in enumerate(bands):
+            if not isinstance(band, dict) or not bool(band.get("enabled", True)):
+                continue
+            try:
+                frequency = max(20.0, min(20000.0, float(band.get("frequency", 1000.0))))
+                q = max(0.2, min(8.0, float(band.get("q", 1.0))))
+                gain_db = max(-18.0, min(18.0, float(band.get("gain_db", 0.0))))
+            except (TypeError, ValueError):
+                continue
+            if abs(gain_db) < 0.05:
+                continue
+
+            kind = str(band.get("kind", "peak"))
+            if index == 0 or kind == "lowshelf":
+                filters.append(f"bass=f={frequency}:t=q:w={q}:g={gain_db}")
+            elif index == len(bands) - 1 or kind == "highshelf":
+                filters.append(f"treble=f={frequency}:t=q:w={q}:g={gain_db}")
+            else:
+                filters.append(f"equalizer=f={frequency}:t=q:w={q}:g={gain_db}")
+        return ",".join(filters) if filters else "anull"
+
+    def _stop_eq_bridge_processes(self, processes: list[dict]) -> None:
+        for process_info in processes:
+            try:
+                pid = int(process_info.get("pid", -1))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if pid <= 0:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                continue
 
     def _get_source_info(self, source_name: str) -> SourceInfo | None:
         for source in self.list_sources():

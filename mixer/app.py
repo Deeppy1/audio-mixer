@@ -177,6 +177,7 @@ def _apply_saved_config(backend: PactlBackend) -> int:
         matrix,
         targets,
         strip_settings=config.get("strip_settings", {}),
+        eq_settings=config.get("eq_settings", {}),
     )
     print("Saved routing applied.")
     return 0
@@ -251,6 +252,8 @@ def _run_gui() -> int:
         raise AudioBackendError(
             "Tk is not available on this system. Install Tk/Tcl or run the CLI commands instead."
         ) from exc
+    from .eq import EQState
+    from .eq_ui import ParametricEQWindow
     from .ui_theme import PALETTE, apply_theme
     from .ui_widgets import AnimatedLevelMeter, NeonToggle
 
@@ -285,6 +288,10 @@ def _run_gui() -> int:
             self.a2_var = tk.StringVar()
             self.hw1_var = tk.StringVar()
             self.hw2_var = tk.StringVar()
+            self.a1_display_var = tk.StringVar()
+            self.a2_display_var = tk.StringVar()
+            self.hw1_display_var = tk.StringVar()
+            self.hw2_display_var = tk.StringVar()
             self.selected_strip_var = tk.StringVar()
             self.selected_strip_label_var = tk.StringVar()
             self.selected_strip_hint_var = tk.StringVar()
@@ -343,6 +350,10 @@ def _run_gui() -> int:
             self.sinks: list[str] = []
             self.sources: list[str] = []
             self.virtual_sources: dict[str, str] = {}
+            self.sink_display_to_name: dict[str, str] = {}
+            self.source_display_to_name: dict[str, str] = {}
+            self.sink_name_to_display: dict[str, str] = {}
+            self.source_name_to_display: dict[str, str] = {}
             self.pending_volume_jobs: dict[str, str] = {}
             self.loading_config = False
             self.keybind_window: tk.Toplevel | None = None
@@ -350,6 +361,10 @@ def _run_gui() -> int:
             self.apps_window: tk.Toplevel | None = None
             self.apps_content_frame = None
             self.app_assignments: dict[str, str] = {}
+            self.eq_states = {
+                source_key: EQState.default()
+                for source_key, _label in self.route_rows
+            }
             self.keybind_value_vars: dict[str, tk.StringVar] = {}
             self.key_capture_target: tuple[str, str] | None = None
             self.strip_card_frames: dict[str, ttk.Frame] = {}
@@ -359,12 +374,14 @@ def _run_gui() -> int:
             self.meter_workers: dict[str, MixerApp.MeterWorker] = {}
             self.strip_layout_columns = 0
             self.layout_after_id: str | None = None
+            self.eq_apply_after_id: str | None = None
             self.command_server_socket: socket.socket | None = None
             self.command_server_thread: threading.Thread | None = None
             self.command_server_stop = threading.Event()
             self.ducking_thread: threading.Thread | None = None
             self.ducking_stop = threading.Event()
             self.ducking_active = False
+            self.eq_window: ParametricEQWindow | None = None
 
             self._build_ui()
             self._bind_shortcuts()
@@ -419,6 +436,7 @@ def _run_gui() -> int:
                 command=self.set_default_system,
                 style="Ghost.TButton",
             ).pack(side="left", padx=(0, 10))
+            ttk.Button(action_bar, text="EQ", command=self.open_eq_window, style="Ghost.TButton").pack(side="left", padx=(0, 10))
             ttk.Button(action_bar, text="Apps", command=self.open_apps_window).pack(side="left", padx=(0, 10))
             ttk.Button(action_bar, text="Keybinds", command=self.open_keybind_window).pack(side="left", padx=(0, 10))
             ttk.Button(action_bar, text="Ducking", command=self.open_ducking_window).pack(side="left")
@@ -435,8 +453,9 @@ def _run_gui() -> int:
             outputs_panel.columnconfigure(0, weight=1)
 
             ttk.Label(outputs_panel, text="A1 Physical Output", style="Body.TLabel").grid(row=0, column=0, sticky="w")
-            self.a1_combo = ttk.Combobox(outputs_panel, textvariable=self.a1_var, state="readonly")
+            self.a1_combo = ttk.Combobox(outputs_panel, textvariable=self.a1_display_var, state="readonly")
             self.a1_combo.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+            self.a1_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("a1"))
             ttk.Button(
                 outputs_panel,
                 text="Test A1",
@@ -445,8 +464,9 @@ def _run_gui() -> int:
             ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 8))
 
             ttk.Label(outputs_panel, text="A2 Physical Output", style="Body.TLabel").grid(row=2, column=0, sticky="w")
-            self.a2_combo = ttk.Combobox(outputs_panel, textvariable=self.a2_var, state="readonly")
+            self.a2_combo = ttk.Combobox(outputs_panel, textvariable=self.a2_display_var, state="readonly")
             self.a2_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+            self.a2_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("a2"))
             ttk.Button(
                 outputs_panel,
                 text="Test A2",
@@ -459,8 +479,9 @@ def _run_gui() -> int:
             inputs_panel.columnconfigure(0, weight=1)
 
             ttk.Label(inputs_panel, text="Hardware In 1", style="Body.TLabel").grid(row=0, column=0, sticky="w")
-            self.hw1_combo = ttk.Combobox(inputs_panel, textvariable=self.hw1_var, state="readonly")
+            self.hw1_combo = ttk.Combobox(inputs_panel, textvariable=self.hw1_display_var, state="readonly")
             self.hw1_combo.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+            self.hw1_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("hw1"))
             ttk.Button(
                 inputs_panel,
                 text="Preview In 1",
@@ -469,8 +490,9 @@ def _run_gui() -> int:
             ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 8))
 
             ttk.Label(inputs_panel, text="Hardware In 2", style="Body.TLabel").grid(row=2, column=0, sticky="w")
-            self.hw2_combo = ttk.Combobox(inputs_panel, textvariable=self.hw2_var, state="readonly")
+            self.hw2_combo = ttk.Combobox(inputs_panel, textvariable=self.hw2_display_var, state="readonly")
             self.hw2_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+            self.hw2_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("hw2"))
             ttk.Button(
                 inputs_panel,
                 text="Preview In 2",
@@ -633,9 +655,19 @@ def _run_gui() -> int:
                 command=lambda source_key=source_key: self.select_strip(source_key),
             )
             solo_toggle.pack(side="left", padx=(8, 0))
+            ttk.Button(
+                controls,
+                text="EQ",
+                command=lambda source_key=source_key: self.open_eq_window_for_strip(source_key),
+                style="Ghost.TButton",
+            ).pack(side="right")
 
             routes = tk.Frame(card, bg=self.palette.panel_alt)
             routes.pack(fill="x")
+            route_row_top = tk.Frame(routes, bg=self.palette.panel_alt)
+            route_row_top.pack(fill="x")
+            route_row_bottom = tk.Frame(routes, bg=self.palette.panel_alt)
+            route_row_bottom.pack(fill="x", pady=(6, 0))
             self.route_vars[source_key] = {}
             route_colors = {
                 "A1": self.palette.accent,
@@ -647,7 +679,7 @@ def _run_gui() -> int:
                 variable = tk.BooleanVar(value=target in ("A1", "B1") and row_index == 1)
                 self.route_vars[source_key][target] = variable
                 toggle = NeonToggle(
-                    routes,
+                    route_row_top if target in ("A1", "A2") else route_row_bottom,
                     text=target,
                     variable=variable,
                     palette=self.palette,
@@ -706,6 +738,56 @@ def _run_gui() -> int:
                 return value
             return " ".join(parts[-4:])
 
+        def _clean_device_label(self, name: str, description: str) -> str:
+            label = (description or "").strip() or name.strip()
+            lowered = label.lower()
+            prefixes = (
+                "alsa input from ",
+                "alsa output from ",
+                "monitor of ",
+                "built-in audio ",
+            )
+            for prefix in prefixes:
+                if lowered.startswith(prefix):
+                    label = label[len(prefix):].strip()
+                    lowered = label.lower()
+            label = label.replace("Analog Stereo", "").replace("analog-stereo", "")
+            label = label.replace("Pro ", "").replace("pro-", "")
+            label = " ".join(label.replace("_", " ").replace(".", " ").split()).strip(" -")
+            return label or name
+
+        def _display_entries_for_devices(self, devices) -> tuple[dict[str, str], dict[str, str], list[str]]:
+            display_to_name: dict[str, str] = {}
+            name_to_display: dict[str, str] = {}
+            display_values: list[str] = []
+            counts: dict[str, int] = {}
+
+            for device in devices:
+                base = self._clean_device_label(device.name, getattr(device, "description", ""))
+                count = counts.get(base, 0)
+                counts[base] = count + 1
+                display = base if count == 0 else f"{base} ({device.name})"
+                display_to_name[display] = device.name
+                name_to_display[device.name] = display
+                display_values.append(display)
+            return display_to_name, name_to_display, display_values
+
+        def _sync_actual_device_var(self, key: str) -> None:
+            if key == "a1":
+                self.a1_var.set(self.sink_display_to_name.get(self.a1_display_var.get(), ""))
+            elif key == "a2":
+                self.a2_var.set(self.sink_display_to_name.get(self.a2_display_var.get(), ""))
+            elif key == "hw1":
+                self.hw1_var.set(self.source_display_to_name.get(self.hw1_display_var.get(), ""))
+            elif key == "hw2":
+                self.hw2_var.set(self.source_display_to_name.get(self.hw2_display_var.get(), ""))
+
+        def _sync_display_device_vars(self) -> None:
+            self.a1_display_var.set(self.sink_name_to_display.get(self.a1_var.get(), self.a1_var.get()))
+            self.a2_display_var.set(self.sink_name_to_display.get(self.a2_var.get(), self.a2_var.get()))
+            self.hw1_display_var.set(self.source_name_to_display.get(self.hw1_var.get(), self.hw1_var.get()))
+            self.hw2_display_var.set(self.source_name_to_display.get(self.hw2_var.get(), self.hw2_var.get()))
+
         def _handle_meter_source_change(self) -> None:
             self._refresh_strip_metadata()
             self._restart_meter_workers()
@@ -737,9 +819,52 @@ def _run_gui() -> int:
             hint_parts = [self.strip_subtitle_vars[source_key].get() or "Mixer strip"]
             if shortcut:
                 hint_parts.append(f"Shortcut: {shortcut}")
+            eq_state = self.eq_states.get(source_key)
+            if eq_state is not None:
+                hint_parts.append("EQ bypassed" if eq_state.bypass else f"EQ {eq_state.preset_name}")
             self.selected_strip_hint_var.set("  |  ".join(hint_parts))
             for key, frame in self.strip_card_frames.items():
                 frame.configure(style="SelectedCard.TFrame" if key == source_key else "Card.TFrame")
+
+        def _persist_eq_settings(self) -> None:
+            self.backend.save_eq_settings(
+                {
+                    source_key: state.to_dict()
+                    for source_key, state in self.eq_states.items()
+                }
+            )
+
+        def _strip_display_name(self, source_key: str) -> str:
+            label_var = self.strip_label_vars.get(source_key)
+            if label_var is None:
+                return source_key
+            return label_var.get().strip() or self.default_route_labels.get(source_key, source_key)
+
+        def _handle_eq_state_change(self, source_key: str, state: EQState) -> None:
+            self.eq_states[source_key] = state
+            self._persist_eq_settings()
+            if source_key == self.selected_strip_var.get():
+                self._update_selected_strip_summary()
+            if self.loading_config:
+                return
+            if self.eq_apply_after_id:
+                self.root.after_cancel(self.eq_apply_after_id)
+            self.eq_apply_after_id = self.root.after(180, self._apply_routing_after_eq_change)
+
+        def _apply_routing_after_eq_change(self) -> None:
+            self.eq_apply_after_id = None
+            self.apply_routing()
+
+        def open_eq_window(self) -> None:
+            self.open_eq_window_for_strip(self.selected_strip_var.get())
+
+        def open_eq_window_for_strip(self, source_key: str) -> None:
+            if source_key not in self.eq_states:
+                return
+            self.select_strip(source_key)
+            if self.eq_window is None:
+                self.eq_window = ParametricEQWindow(self.root, palette=self.palette, on_change=self._handle_eq_state_change)
+            self.eq_window.open_for_strip(source_key, self._strip_display_name(source_key), self.eq_states[source_key])
 
         def refresh_devices(self) -> None:
             try:
@@ -750,14 +875,18 @@ def _run_gui() -> int:
                 self.status_var.set(str(exc))
                 return
 
-            self.sinks = [sink.name for sink in sinks if not sink.name.startswith("vm_")]
-            self.sources = [source.name for source in sources if ".monitor" not in source.name]
+            visible_sinks = [sink for sink in sinks if not sink.name.startswith("vm_")]
+            visible_sources = [source for source in sources if ".monitor" not in source.name]
+            self.sinks = [sink.name for sink in visible_sinks]
+            self.sources = [source.name for source in visible_sources]
             self.virtual_sources = dict(virtual_sources)
+            self.sink_display_to_name, self.sink_name_to_display, sink_values = self._display_entries_for_devices(visible_sinks)
+            self.source_display_to_name, self.source_name_to_display, source_values = self._display_entries_for_devices(visible_sources)
 
-            self.a1_combo["values"] = self.sinks
-            self.a2_combo["values"] = self.sinks
-            self.hw1_combo["values"] = self.sources
-            self.hw2_combo["values"] = self.sources
+            self.a1_combo["values"] = sink_values
+            self.a2_combo["values"] = sink_values
+            self.hw1_combo["values"] = source_values
+            self.hw2_combo["values"] = source_values
 
             if self.sinks and not self.a1_var.get():
                 self.a1_var.set(self.sinks[0])
@@ -770,6 +899,8 @@ def _run_gui() -> int:
                 self.hw1_var.set(self.sources[0])
             if len(self.sources) > 1 and not self.hw2_var.get():
                 self.hw2_var.set(self.sources[1])
+
+            self._sync_display_device_vars()
 
             b1_monitor = virtual_sources.get("bus_b1", "missing")
             b2_monitor = virtual_sources.get("bus_b2", "missing")
@@ -1690,6 +1821,7 @@ def _run_gui() -> int:
             targets = config.get("targets", {})
             matrix = config.get("matrix", {})
             strip_settings = config.get("strip_settings", {})
+            eq_settings = config.get("eq_settings", {})
             saved_selection_keybinds = config.get("selection_keybinds", {})
             saved_volume_keybinds = config.get("volume_keybinds", {})
             ducking = config.get("ducking", {})
@@ -1730,6 +1862,9 @@ def _run_gui() -> int:
                         self.strip_volume_vars[source_key].set(int(round(float(volume))))
                     except (TypeError, ValueError):
                         self.strip_volume_vars[source_key].set(100)
+
+            for source_key in self.eq_states:
+                self.eq_states[source_key] = EQState.from_dict(eq_settings.get(source_key))
 
             if self.route_rows:
                 self.select_strip(self.route_rows[0][0])
@@ -1820,7 +1955,13 @@ def _run_gui() -> int:
             }
 
             try:
-                self.backend.apply_routing(source_map, matrix, targets, strip_settings=strip_settings)
+                self.backend.apply_routing(
+                    source_map,
+                    matrix,
+                    targets,
+                    strip_settings=strip_settings,
+                    eq_settings={source_key: state.to_dict() for source_key, state in self.eq_states.items()},
+                )
             except AudioBackendError as exc:
                 messagebox.showerror("Audio backend error", str(exc))
                 self.status_var.set(str(exc))
@@ -1927,6 +2068,10 @@ def _run_gui() -> int:
             self.close_keybind_window()
             self.close_ducking_window()
             self.close_apps_window()
+            if self.eq_window is not None:
+                self.eq_window.close()
+            if self.eq_apply_after_id:
+                self.root.after_cancel(self.eq_apply_after_id)
             self._stop_ducking_monitor()
             self._stop_meter_workers()
             self._stop_command_server()
