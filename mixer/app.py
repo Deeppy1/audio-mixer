@@ -5,12 +5,14 @@ import argparse
 import json
 import math
 import os
+import shutil
 import socket
 import struct
 import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from version import version
 from updatecheck import *
@@ -249,6 +251,8 @@ def _run_gui() -> int:
         raise AudioBackendError(
             "Tk is not available on this system. Install Tk/Tcl or run the CLI commands instead."
         ) from exc
+    from .ui_theme import PALETTE, apply_theme
+    from .ui_widgets import AnimatedLevelMeter, NeonToggle
 
     class MixerApp:
         ROUTE_TARGETS = ("A1", "A2", "B1", "B2")
@@ -259,11 +263,21 @@ def _run_gui() -> int:
             "virtual_input_2": "Input 2",
         }
 
+        @dataclass
+        class MeterWorker:
+            stop: threading.Event
+            thread: threading.Thread
+            source_name: str
+            channels: int
+
         def __init__(self, root: tk.Tk) -> None:
             self.root = root
             self.backend = PactlBackend()
-            self.root.title("Audio Mixer")
-            self.root.geometry("980x560")
+            self.palette = PALETTE
+            self.style = apply_theme(self.root)
+            self.root.title("Audio Mixer Studio")
+            self.root.geometry("1460x880")
+            self.root.minsize(1180, 760)
             self.root.protocol("WM_DELETE_WINDOW", self.close)
 
             self.status_var = tk.StringVar(value="Ready")
@@ -273,6 +287,9 @@ def _run_gui() -> int:
             self.hw2_var = tk.StringVar()
             self.selected_strip_var = tk.StringVar()
             self.selected_strip_label_var = tk.StringVar()
+            self.selected_strip_hint_var = tk.StringVar()
+            self.selected_strip_volume_var = tk.StringVar(value="100%")
+            self.selected_strip_routes_var = tk.StringVar(value="No routes active")
             self.ducking_enabled_var = tk.BooleanVar(value=False)
             self.ducking_source_var = tk.StringVar(value="Hardware In 1")
             self.ducking_amount_var = tk.IntVar(value=35)
@@ -302,6 +319,14 @@ def _run_gui() -> int:
                 source_key: tk.IntVar(value=100)
                 for source_key, _label in self.route_rows
             }
+            self.strip_volume_readout_vars = {
+                source_key: tk.StringVar(value="100%")
+                for source_key, _label in self.route_rows
+            }
+            self.strip_subtitle_vars = {
+                source_key: tk.StringVar(value="")
+                for source_key, _label in self.route_rows
+            }
             self.default_route_labels = dict(self.route_rows)
             self.selected_strip_var.set(self.route_rows[0][0])
             self.selected_strip_label_var.set(self.route_rows[0][1])
@@ -317,6 +342,7 @@ def _run_gui() -> int:
 
             self.sinks: list[str] = []
             self.sources: list[str] = []
+            self.virtual_sources: dict[str, str] = {}
             self.pending_volume_jobs: dict[str, str] = {}
             self.loading_config = False
             self.keybind_window: tk.Toplevel | None = None
@@ -326,6 +352,13 @@ def _run_gui() -> int:
             self.app_assignments: dict[str, str] = {}
             self.keybind_value_vars: dict[str, tk.StringVar] = {}
             self.key_capture_target: tuple[str, str] | None = None
+            self.strip_card_frames: dict[str, ttk.Frame] = {}
+            self.strip_card_bodies: dict[str, tk.Widget] = {}
+            self.strip_meters: dict[str, AnimatedLevelMeter] = {}
+            self.meter_levels = {source_key: 0.0 for source_key, _label in self.route_rows}
+            self.meter_workers: dict[str, MixerApp.MeterWorker] = {}
+            self.strip_layout_columns = 0
+            self.layout_after_id: str | None = None
             self.command_server_socket: socket.socket | None = None
             self.command_server_thread: threading.Thread | None = None
             self.command_server_stop = threading.Event()
@@ -337,136 +370,376 @@ def _run_gui() -> int:
             self._bind_shortcuts()
             self.refresh_devices()
             self._bind_volume_traces()
+            self.hw1_var.trace_add("write", lambda *_args: self._handle_meter_source_change())
+            self.hw2_var.trace_add("write", lambda *_args: self._handle_meter_source_change())
             self.ducking_amount_var.trace_add("write", lambda *_args: self._update_ducking_config())
             self.ducking_threshold_var.trace_add("write", lambda *_args: self._update_ducking_config())
             self.loading_config = True
             self.load_saved_config()
             self.loading_config = False
             self._start_command_server()
+            self._restart_meter_workers()
 
         def _build_ui(self) -> None:
-            top = ttk.Frame(self.root, padding=12)
-            top.pack(fill="both", expand=True)
+            shell = ttk.Frame(self.root, style="Shell.TFrame", padding=20)
+            shell.pack(fill="both", expand=True)
+            shell.columnconfigure(1, weight=1)
+            shell.rowconfigure(1, weight=1)
 
-            control_bar = ttk.Frame(top)
-            control_bar.pack(fill="x")
+            header = ttk.Frame(shell, style="Toolbar.TFrame")
+            header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
+            header.columnconfigure(0, weight=1)
 
+            title_block = ttk.Frame(header, style="Toolbar.TFrame")
+            title_block.grid(row=0, column=0, sticky="w")
+            ttk.Label(title_block, text="Audio Mixer Studio", style="Title.TLabel").pack(anchor="w")
+            ttk.Label(
+                title_block,
+                text="PipeWire routing control with persistent buses, strip selection, ducking, and app assignment.",
+                style="Subtitle.TLabel",
+            ).pack(anchor="w", pady=(4, 0))
+
+            action_bar = ttk.Frame(header, style="Toolbar.TFrame")
+            action_bar.grid(row=0, column=1, sticky="e")
             ttk.Button(
-                control_bar,
+                action_bar,
                 text="Create / Repair Virtual Devices",
                 command=self.create_virtual_devices,
-            ).pack(side="left")
-            ttk.Button(control_bar, text="Refresh", command=self.refresh_devices).pack(side="left", padx=8)
-            ttk.Button(control_bar, text="Apply Routing", command=self.apply_routing).pack(side="left")
-            ttk.Button(control_bar, text="Set Desktop To VM_System", command=self.set_default_system).pack(
-                side="left", padx=8
+                style="Ghost.TButton",
+            ).pack(side="left", padx=(0, 10))
+            ttk.Button(action_bar, text="Refresh", command=self.refresh_devices, style="Ghost.TButton").pack(
+                side="left", padx=(0, 10)
             )
-            ttk.Button(control_bar, text="Apps", command=self.open_apps_window).pack(side="left", padx=(8, 0))
-            ttk.Button(control_bar, text="Keybinds", command=self.open_keybind_window).pack(side="left")
-            ttk.Button(control_bar, text="Ducking", command=self.open_ducking_window).pack(side="left", padx=(8, 0))
+            ttk.Button(action_bar, text="Apply Routing", command=self.apply_routing, style="Accent.TButton").pack(
+                side="left", padx=(0, 10)
+            )
+            ttk.Button(
+                action_bar,
+                text="Set Desktop To VM_System",
+                command=self.set_default_system,
+                style="Ghost.TButton",
+            ).pack(side="left", padx=(0, 10))
+            ttk.Button(action_bar, text="Apps", command=self.open_apps_window).pack(side="left", padx=(0, 10))
+            ttk.Button(action_bar, text="Keybinds", command=self.open_keybind_window).pack(side="left", padx=(0, 10))
+            ttk.Button(action_bar, text="Ducking", command=self.open_ducking_window).pack(side="left")
 
-            config_frame = ttk.LabelFrame(top, text="Bus Targets", padding=12)
-            config_frame.pack(fill="x", pady=12)
+            sidebar = ttk.Frame(shell, style="Panel.TFrame", padding=18)
+            sidebar.grid(row=1, column=0, sticky="nsew", padx=(0, 18))
+            sidebar.configure(width=320)
+            sidebar.grid_propagate(False)
+            sidebar.columnconfigure(0, weight=1)
 
-            ttk.Label(config_frame, text="A1 Physical Output").grid(row=0, column=0, sticky="w")
-            self.a1_combo = ttk.Combobox(config_frame, textvariable=self.a1_var, state="readonly")
-            self.a1_combo.grid(row=0, column=1, sticky="ew", padx=(8, 24))
-            ttk.Button(config_frame, text="Test A1", command=lambda: self.run_in_background(self.test_output_a1)).grid(
-                row=0, column=2, padx=(8, 16)
+            ttk.Label(sidebar, text="Bus Targets", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+            outputs_panel = ttk.LabelFrame(sidebar, text="Outputs", style="Panel.TLabelframe", padding=14)
+            outputs_panel.grid(row=1, column=0, sticky="ew", pady=(12, 14))
+            outputs_panel.columnconfigure(0, weight=1)
+
+            ttk.Label(outputs_panel, text="A1 Physical Output", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+            self.a1_combo = ttk.Combobox(outputs_panel, textvariable=self.a1_var, state="readonly")
+            self.a1_combo.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+            ttk.Button(
+                outputs_panel,
+                text="Test A1",
+                command=lambda: self.run_in_background(self.test_output_a1),
+                style="Ghost.TButton",
+            ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 8))
+
+            ttk.Label(outputs_panel, text="A2 Physical Output", style="Body.TLabel").grid(row=2, column=0, sticky="w")
+            self.a2_combo = ttk.Combobox(outputs_panel, textvariable=self.a2_var, state="readonly")
+            self.a2_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+            ttk.Button(
+                outputs_panel,
+                text="Test A2",
+                command=lambda: self.run_in_background(self.test_output_a2),
+                style="Ghost.TButton",
+            ).grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
+
+            inputs_panel = ttk.LabelFrame(sidebar, text="Hardware Inputs", style="Panel.TLabelframe", padding=14)
+            inputs_panel.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+            inputs_panel.columnconfigure(0, weight=1)
+
+            ttk.Label(inputs_panel, text="Hardware In 1", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+            self.hw1_combo = ttk.Combobox(inputs_panel, textvariable=self.hw1_var, state="readonly")
+            self.hw1_combo.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+            ttk.Button(
+                inputs_panel,
+                text="Preview In 1",
+                command=lambda: self.run_in_background(self.test_input_1),
+                style="Ghost.TButton",
+            ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 8))
+
+            ttk.Label(inputs_panel, text="Hardware In 2", style="Body.TLabel").grid(row=2, column=0, sticky="w")
+            self.hw2_combo = ttk.Combobox(inputs_panel, textvariable=self.hw2_var, state="readonly")
+            self.hw2_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+            ttk.Button(
+                inputs_panel,
+                text="Preview In 2",
+                command=lambda: self.run_in_background(self.test_input_2),
+                style="Ghost.TButton",
+            ).grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
+
+            monitor_panel = ttk.LabelFrame(sidebar, text="Monitoring", style="Panel.TLabelframe", padding=14)
+            monitor_panel.grid(row=3, column=0, sticky="ew", pady=(0, 14))
+            monitor_panel.columnconfigure(0, weight=1)
+            ttk.Label(monitor_panel, text="Selected Strip", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(monitor_panel, textvariable=self.selected_strip_label_var, style="Section.TLabel").grid(
+                row=1, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(monitor_panel, textvariable=self.selected_strip_hint_var, style="Muted.TLabel", wraplength=250).grid(
+                row=2, column=0, sticky="w", pady=(4, 10)
+            )
+            self.monitor_meter = AnimatedLevelMeter(
+                monitor_panel,
+                level_getter=lambda: self._meter_level_for_strip(self.selected_strip_var.get()),
+                orientation="horizontal",
+                height=18,
+                width=260,
+                segments=24,
+            )
+            self.monitor_meter.grid(row=3, column=0, sticky="ew")
+            ttk.Label(monitor_panel, text="Level", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=(8, 0))
+            ttk.Label(monitor_panel, textvariable=self.selected_strip_volume_var, style="Body.TLabel").grid(
+                row=5, column=0, sticky="w"
+            )
+            ttk.Label(monitor_panel, text="Routes", style="Muted.TLabel").grid(row=6, column=0, sticky="w", pady=(8, 0))
+            ttk.Label(monitor_panel, textvariable=self.selected_strip_routes_var, style="Body.TLabel", wraplength=250).grid(
+                row=7, column=0, sticky="w"
             )
 
-            ttk.Label(config_frame, text="A2 Physical Output").grid(row=0, column=3, sticky="w")
-            self.a2_combo = ttk.Combobox(config_frame, textvariable=self.a2_var, state="readonly")
-            self.a2_combo.grid(row=0, column=4, sticky="ew", padx=(8, 8))
-            ttk.Button(config_frame, text="Test A2", command=lambda: self.run_in_background(self.test_output_a2)).grid(
-                row=0, column=5
-            )
+            status_panel = ttk.LabelFrame(sidebar, text="Session", style="Panel.TLabelframe", padding=14)
+            status_panel.grid(row=4, column=0, sticky="nsew")
+            status_panel.columnconfigure(0, weight=1)
 
-            ttk.Label(config_frame, text="Hardware In 1").grid(row=1, column=0, sticky="w", pady=(10, 0))
-            self.hw1_combo = ttk.Combobox(config_frame, textvariable=self.hw1_var, state="readonly")
-            self.hw1_combo.grid(row=1, column=1, sticky="ew", padx=(8, 24), pady=(10, 0))
-            ttk.Button(config_frame, text="Test In 1", command=lambda: self.run_in_background(self.test_input_1)).grid(
-                row=1, column=2, padx=(8, 16), pady=(10, 0)
-            )
-
-            ttk.Label(config_frame, text="Hardware In 2").grid(row=1, column=3, sticky="w", pady=(10, 0))
-            self.hw2_combo = ttk.Combobox(config_frame, textvariable=self.hw2_var, state="readonly")
-            self.hw2_combo.grid(row=1, column=4, sticky="ew", padx=(8, 8), pady=(10, 0))
-            ttk.Button(config_frame, text="Test In 2", command=lambda: self.run_in_background(self.test_input_2)).grid(
-                row=1, column=5, pady=(10, 0)
-            )
-
-            config_frame.columnconfigure(1, weight=1)
-            config_frame.columnconfigure(4, weight=1)
-
-            matrix_frame = ttk.LabelFrame(top, text="Routing Matrix", padding=12)
-            matrix_frame.pack(fill="both", expand=True)
-
-            ttk.Label(matrix_frame, text="Source").grid(row=0, column=0, sticky="w", padx=(0, 16))
-            ttk.Label(matrix_frame, text="Mute").grid(row=0, column=1, padx=12)
-            ttk.Label(matrix_frame, text="Solo").grid(row=0, column=2, padx=12)
-            ttk.Label(matrix_frame, text="Vol").grid(row=0, column=3, padx=12)
-            for index, target in enumerate(self.ROUTE_TARGETS, start=1):
-                ttk.Label(matrix_frame, text=target).grid(row=0, column=index + 3, padx=12)
-
-            for row_index, (source_key, label) in enumerate(self.route_rows, start=1):
-                label_entry = ttk.Entry(
-                    matrix_frame,
-                    textvariable=self.strip_label_vars[source_key],
-                    width=22,
-                )
-                label_entry.grid(row=row_index, column=0, sticky="ew", padx=(0, 8))
-                label_entry.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
-                mute_box = ttk.Checkbutton(matrix_frame, variable=self.strip_mute_vars[source_key])
-                mute_box.grid(
-                    row=row_index,
-                    column=1,
-                )
-                mute_box.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
-                solo_box = ttk.Checkbutton(matrix_frame, variable=self.strip_solo_vars[source_key])
-                solo_box.grid(
-                    row=row_index,
-                    column=2,
-                )
-                solo_box.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
-                volume_scale = ttk.Scale(
-                    matrix_frame,
-                    from_=0,
-                    to=150,
-                    orient="horizontal",
-                    variable=self.strip_volume_vars[source_key],
-                )
-                volume_scale.grid(row=row_index, column=3, sticky="ew", padx=(8, 8))
-                volume_scale.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
-                self.route_vars[source_key] = {}
-                for col_index, target in enumerate(self.ROUTE_TARGETS, start=1):
-                    variable = tk.BooleanVar(value=target in ("A1", "B1") and row_index == 1)
-                    self.route_vars[source_key][target] = variable
-                    route_box = ttk.Checkbutton(matrix_frame, variable=variable)
-                    route_box.grid(row=row_index, column=col_index + 3)
-                    route_box.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
-
-            matrix_frame.columnconfigure(0, weight=1)
-            matrix_frame.columnconfigure(3, weight=1)
-
-            selected_strip_frame = ttk.Frame(top)
-            selected_strip_frame.pack(fill="x", pady=(8, 0))
-            ttk.Label(selected_strip_frame, text="Selected Fader").pack(side="left")
-            ttk.Label(selected_strip_frame, textvariable=self.selected_strip_label_var).pack(side="left", padx=(8, 0))
-            
             status = updatecheck()
             help_text = (
-                "VM_System is a dedicated playback device for general desktop audio.\n"
-                "VM_Input_1 and VM_Input_2 are extra playback devices for specific apps.\n"
-                "VM_Bus_B1 and VM_Bus_B2 expose monitor sources that other apps can record.\n"
-                "Click a strip to make it active, or configure selection shortcuts in Keybinds.\n"
-                "Open Ducking to lower System Playback, Input 1, and Input 2 while the selected mic is active.\n"
-                f"Version: {version} {status}"
+                "VM_System handles desktop playback.\n"
+                "VM_Input_1 and VM_Input_2 are assignable app playback lanes.\n"
+                "B1 and B2 expose monitor buses for capture apps.\n"
+                f"Version: {version}  {status}"
             )
-            ttk.Label(top, text=help_text, justify="left").pack(anchor="w")
+            ttk.Label(status_panel, text=help_text, style="Muted.TLabel", justify="left", wraplength=260).grid(
+                row=0, column=0, sticky="w"
+            )
 
-            status = ttk.Label(top, textvariable=self.status_var)
-            status.pack(anchor="w", pady=(10, 0))
+            mixer_shell = ttk.Frame(shell, style="Surface.TFrame")
+            mixer_shell.grid(row=1, column=1, sticky="nsew")
+            mixer_shell.columnconfigure(0, weight=1)
+            mixer_shell.rowconfigure(1, weight=1)
+
+            mix_header = ttk.Frame(mixer_shell, style="Surface.TFrame")
+            mix_header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+            mix_header.columnconfigure(0, weight=1)
+            ttk.Label(mix_header, text="Routing Matrix", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(
+                mix_header,
+                text="Editable strip labels, mute/solo, responsive channel cards, and illuminated A/B bus routing.",
+                style="Subtitle.TLabel",
+            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+            self.strip_grid_frame = ttk.Frame(mixer_shell, style="Surface.TFrame")
+            self.strip_grid_frame.grid(row=1, column=0, sticky="nsew")
+            self.strip_grid_frame.bind("<Configure>", lambda _event: self._queue_strip_layout())
+
+            for row_index, (source_key, label) in enumerate(self.route_rows, start=1):
+                self._create_strip_card(source_key, label, row_index)
+
+            self.status_bar = ttk.Frame(shell, style="Status.TFrame", padding=(16, 12))
+            self.status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+            self.status_bar.columnconfigure(0, weight=1)
+            ttk.Label(self.status_bar, textvariable=self.status_var, style="Status.TLabel").grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(self.status_bar, text="Remote control socket active", style="Badge.TLabel").grid(
+                row=0, column=1, sticky="e"
+            )
+
+            self._refresh_strip_metadata()
+            self._queue_strip_layout()
+
+        def _create_strip_card(self, source_key: str, label: str, row_index: int) -> None:
+            card = ttk.Frame(self.strip_grid_frame, style="Card.TFrame", padding=14)
+            self.strip_card_frames[source_key] = card
+            card.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+
+            header = ttk.Frame(card, style="Card.TFrame")
+            header.pack(fill="x")
+            header.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+
+            label_entry = ttk.Entry(header, textvariable=self.strip_label_vars[source_key], width=18)
+            label_entry.pack(fill="x")
+            label_entry.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+
+            subtitle = ttk.Label(header, textvariable=self.strip_subtitle_vars[source_key], style="CardSubtitle.TLabel")
+            subtitle.pack(anchor="w", pady=(6, 0))
+            subtitle.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+
+            channel_body = tk.Frame(card, bg=self.palette.panel_alt)
+            channel_body.pack(fill="both", expand=True, pady=(14, 10))
+            self.strip_card_bodies[source_key] = channel_body
+            channel_body.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+
+            meter = AnimatedLevelMeter(
+                channel_body,
+                level_getter=lambda source_key=source_key: self._meter_level_for_strip(source_key),
+                orientation="vertical",
+                height=190,
+                width=28,
+                segments=28,
+            )
+            meter.pack(side="left", fill="y")
+            meter.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+            self.strip_meters[source_key] = meter
+
+            slider_column = tk.Frame(channel_body, bg=self.palette.panel_alt)
+            slider_column.pack(side="left", fill="y", expand=True, padx=(14, 0))
+            slider_column.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+
+            ttk.Label(slider_column, textvariable=self.strip_volume_readout_vars[source_key], style="CardTitle.TLabel").pack(
+                anchor="center"
+            )
+            volume_scale = ttk.Scale(
+                slider_column,
+                from_=150,
+                to=0,
+                orient="vertical",
+                variable=self.strip_volume_vars[source_key],
+                style="Mixer.Vertical.TScale",
+                length=210,
+            )
+            volume_scale.pack(fill="y", expand=True, pady=(10, 8))
+            volume_scale.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+            ttk.Label(slider_column, text="Gain", style="CardSubtitle.TLabel").pack(anchor="center")
+
+            controls = tk.Frame(card, bg=self.palette.panel_alt)
+            controls.pack(fill="x", pady=(0, 10))
+
+            mute_toggle = NeonToggle(
+                controls,
+                text="Mute",
+                variable=self.strip_mute_vars[source_key],
+                palette=self.palette,
+                on_color=self.palette.danger,
+                width=6,
+                command=lambda source_key=source_key: self.select_strip(source_key),
+            )
+            mute_toggle.pack(side="left")
+            solo_toggle = NeonToggle(
+                controls,
+                text="Solo",
+                variable=self.strip_solo_vars[source_key],
+                palette=self.palette,
+                on_color=self.palette.warning,
+                width=6,
+                command=lambda source_key=source_key: self.select_strip(source_key),
+            )
+            solo_toggle.pack(side="left", padx=(8, 0))
+
+            routes = tk.Frame(card, bg=self.palette.panel_alt)
+            routes.pack(fill="x")
+            self.route_vars[source_key] = {}
+            route_colors = {
+                "A1": self.palette.accent,
+                "A2": self.palette.accent_bright,
+                "B1": self.palette.accent_soft,
+                "B2": "#C45EFF",
+            }
+            for target in self.ROUTE_TARGETS:
+                variable = tk.BooleanVar(value=target in ("A1", "B1") and row_index == 1)
+                self.route_vars[source_key][target] = variable
+                toggle = NeonToggle(
+                    routes,
+                    text=target,
+                    variable=variable,
+                    palette=self.palette,
+                    on_color=route_colors[target],
+                    width=4,
+                    command=lambda source_key=source_key: self.select_strip(source_key),
+                )
+                toggle.pack(side="left", padx=(0, 6))
+
+        def _queue_strip_layout(self) -> None:
+            if self.layout_after_id:
+                self.root.after_cancel(self.layout_after_id)
+            self.layout_after_id = self.root.after(40, self._layout_strip_cards)
+
+        def _layout_strip_cards(self) -> None:
+            self.layout_after_id = None
+            width = max(1, self.strip_grid_frame.winfo_width())
+            column_count = max(1, min(len(self.route_rows), width // 245))
+            if column_count == self.strip_layout_columns and any(frame.winfo_manager() for frame in self.strip_card_frames.values()):
+                return
+            self.strip_layout_columns = column_count
+
+            for child in self.strip_grid_frame.winfo_children():
+                child.grid_forget()
+            for index, (source_key, _label) in enumerate(self.route_rows):
+                row = index // column_count
+                column = index % column_count
+                self.strip_card_frames[source_key].grid(row=row, column=column, sticky="nsew", padx=8, pady=8)
+            for column in range(column_count):
+                self.strip_grid_frame.columnconfigure(column, weight=1, uniform="strip")
+
+        def _refresh_strip_metadata(self) -> None:
+            for source_key, _label in self.route_rows:
+                self.strip_subtitle_vars[source_key].set(self._strip_subtitle(source_key))
+                self.strip_volume_readout_vars[source_key].set(f"{int(self.strip_volume_vars[source_key].get())}%")
+            self._update_selected_strip_summary()
+
+        def _strip_subtitle(self, source_key: str) -> str:
+            if source_key == "hardware_input_1":
+                return self._short_device_name(self.hw1_var.get()) or "Select physical input"
+            if source_key == "hardware_input_2":
+                return self._short_device_name(self.hw2_var.get()) or "Select physical input"
+            if source_key == "system_playback":
+                return "VM_System desktop playback lane"
+            if source_key == "virtual_input_1":
+                return "VM_Input_1 app playback lane"
+            if source_key == "virtual_input_2":
+                return "VM_Input_2 app playback lane"
+            return ""
+
+        def _short_device_name(self, value: str) -> str:
+            if not value:
+                return ""
+            parts = [part for part in value.replace(".", "_").split("_") if part]
+            if len(parts) <= 4:
+                return value
+            return " ".join(parts[-4:])
+
+        def _handle_meter_source_change(self) -> None:
+            self._refresh_strip_metadata()
+            self._restart_meter_workers()
+
+        def _meter_level_for_strip(self, source_key: str) -> float:
+            raw_level = max(0.0, min(1.0, float(self.meter_levels.get(source_key, 0.0))))
+            effective_gain = max(0.0, float(self._effective_strip_volume(source_key)) / 100.0)
+
+            # Display the real sampled source, but scale the visible response by the strip's
+            # current effective gain so raising the fader produces a more energetic meter.
+            gain_scaled = raw_level * min(1.7, max(0.45, effective_gain))
+
+            # Add a slight upward curve so moderate signals bounce more like a mixer meter.
+            if gain_scaled > 0.0:
+                gain_scaled = pow(min(1.0, gain_scaled), 0.78)
+
+            if self.strip_mute_vars[source_key].get():
+                gain_scaled *= 0.15
+            return max(0.0, min(1.0, gain_scaled))
+
+        def _update_selected_strip_summary(self) -> None:
+            source_key = self.selected_strip_var.get()
+            label = self.strip_label_vars[source_key].get().strip() or self.default_route_labels[source_key]
+            self.selected_strip_label_var.set(label)
+            self.selected_strip_volume_var.set(f"{int(self._effective_strip_volume(source_key))}% effective gain")
+            active_targets = [target for target in self.ROUTE_TARGETS if self._route_enabled_for_strip(source_key, target)]
+            self.selected_strip_routes_var.set(", ".join(active_targets) if active_targets else "No routes active")
+            shortcut = self.selection_keybinds.get(source_key, "")
+            hint_parts = [self.strip_subtitle_vars[source_key].get() or "Mixer strip"]
+            if shortcut:
+                hint_parts.append(f"Shortcut: {shortcut}")
+            self.selected_strip_hint_var.set("  |  ".join(hint_parts))
+            for key, frame in self.strip_card_frames.items():
+                frame.configure(style="SelectedCard.TFrame" if key == source_key else "Card.TFrame")
 
         def refresh_devices(self) -> None:
             try:
@@ -479,6 +752,7 @@ def _run_gui() -> int:
 
             self.sinks = [sink.name for sink in sinks if not sink.name.startswith("vm_")]
             self.sources = [source.name for source in sources if ".monitor" not in source.name]
+            self.virtual_sources = dict(virtual_sources)
 
             self.a1_combo["values"] = self.sinks
             self.a2_combo["values"] = self.sinks
@@ -499,6 +773,8 @@ def _run_gui() -> int:
 
             b1_monitor = virtual_sources.get("bus_b1", "missing")
             b2_monitor = virtual_sources.get("bus_b2", "missing")
+            self._refresh_strip_metadata()
+            self._restart_meter_workers()
             self.status_var.set(
                 f"Detected {len(self.sinks)} outputs, {len(self.sources)} inputs. "
                 f"B1={b1_monitor} B2={b2_monitor}"
@@ -527,9 +803,8 @@ def _run_gui() -> int:
             if source_key not in self.default_route_labels:
                 return
             self.selected_strip_var.set(source_key)
-            label = self.strip_label_vars[source_key].get().strip() or self.default_route_labels[source_key]
-            self.selected_strip_label_var.set(label)
-            self.status_var.set(f"Selected fader: {label}")
+            self._update_selected_strip_summary()
+            self.status_var.set(f"Selected fader: {self.selected_strip_label_var.get()}")
 
         def _ducking_config(self) -> dict[str, int | bool | str]:
             return {
@@ -587,22 +862,8 @@ def _run_gui() -> int:
 
         def _ducking_monitor_loop(self) -> None:
             source_name = self._ducking_source_name()
-            args = [
-                "pw-record",
-                "--target",
-                source_name,
-                "--rate=16000",
-                "--channels=1",
-                "--format=s16",
-                "-",
-            ]
             try:
-                process = subprocess.Popen(
-                    args,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    env=os.environ.copy(),
-                )
+                process = self._start_source_capture_process(source_name, 1)
             except OSError as exc:
                 self.root.after(0, lambda: self._ducking_monitor_failed(f"Ducking unavailable: {exc}"))
                 return
@@ -647,6 +908,160 @@ def _run_gui() -> int:
             samples = struct.unpack("<" + ("h" * sample_count), chunk[: sample_count * 2])
             rms = math.sqrt(sum(sample * sample for sample in samples) / sample_count)
             return int(round((rms / 32767.0) * 100))
+
+        def _pcm_level_ratio(self, chunk: bytes) -> float:
+            sample_count = len(chunk) // 2
+            if sample_count <= 0:
+                return 0.0
+            samples = struct.unpack("<" + ("h" * sample_count), chunk[: sample_count * 2])
+            peak = max(abs(sample) for sample in samples) / 32767.0
+            rms = math.sqrt(sum(sample * sample for sample in samples) / sample_count) / 32767.0
+
+            # Use a blended signal and map roughly -55 dBFS..0 dBFS into the visible meter range.
+            # Raw linear RMS is too small for typical desktop playback and looks nearly inactive.
+            signal = max(rms * 1.35, peak * 0.9)
+            signal = max(0.000001, min(1.0, signal))
+            floor_db = -55.0
+            db = 20.0 * math.log10(signal)
+            normalized = (db - floor_db) / abs(floor_db)
+            return max(0.0, min(1.0, normalized))
+
+        def _meter_source_name(self, source_key: str) -> str:
+            if source_key == "hardware_input_1":
+                return self.hw1_var.get().strip()
+            if source_key == "hardware_input_2":
+                return self.hw2_var.get().strip()
+            return self.virtual_sources.get(source_key, "").strip()
+
+        def _source_channel_count(self, source_name: str) -> int:
+            if not source_name:
+                return 0
+            for source in self.backend.list_sources():
+                if source.name == source_name:
+                    return max(1, int(source.channels or 0))
+            return 0
+
+        def _meter_capture_channels(self, source_name: str) -> int:
+            channels = self._source_channel_count(source_name)
+            if channels <= 1:
+                return 1
+            return 2
+
+        def _restart_meter_workers(self) -> None:
+            desired_sources = {
+                source_key: self._meter_source_name(source_key)
+                for source_key, _label in self.route_rows
+            }
+
+            for source_key, worker in list(self.meter_workers.items()):
+                desired_name = desired_sources.get(source_key, "")
+                desired_channels = self._meter_capture_channels(desired_name) if desired_name else 0
+                if (
+                    desired_name == worker.source_name
+                    and desired_channels == worker.channels
+                    and worker.thread.is_alive()
+                ):
+                    continue
+                self._stop_meter_worker(source_key)
+
+            for source_key, source_name in desired_sources.items():
+                if not source_name or source_key in self.meter_workers:
+                    if not source_name:
+                        self.meter_levels[source_key] = 0.0
+                    continue
+                channels = self._meter_capture_channels(source_name)
+                stop_event = threading.Event()
+                thread = threading.Thread(
+                    target=self._meter_worker_loop,
+                    args=(source_key, source_name, channels, stop_event),
+                    daemon=True,
+                )
+                self.meter_workers[source_key] = self.MeterWorker(
+                    stop=stop_event,
+                    thread=thread,
+                    source_name=source_name,
+                    channels=channels,
+                )
+                thread.start()
+
+        def _stop_meter_worker(self, source_key: str) -> None:
+            worker = self.meter_workers.pop(source_key, None)
+            if worker is None:
+                return
+            worker.stop.set()
+            self.meter_levels[source_key] = 0.0
+
+        def _stop_meter_workers(self) -> None:
+            for source_key in list(self.meter_workers):
+                self._stop_meter_worker(source_key)
+
+        def _meter_worker_loop(
+            self,
+            source_key: str,
+            source_name: str,
+            channels: int,
+            stop_event: threading.Event,
+        ) -> None:
+            process = None
+            level = 0.0
+            try:
+                process = self._start_source_capture_process(source_name, max(1, channels))
+                while not stop_event.is_set():
+                    if process.stdout is None:
+                        break
+                    chunk = process.stdout.read(3200)
+                    if not chunk:
+                        break
+                    target = self._pcm_level_ratio(chunk)
+                    level += (target - level) * 0.45
+                    self.meter_levels[source_key] = level
+            except OSError:
+                self.meter_levels[source_key] = 0.0
+                return
+            finally:
+                self.meter_levels[source_key] = 0.0
+                if process is not None:
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                    try:
+                        process.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.kill()
+                        except OSError:
+                            pass
+
+        def _start_source_capture_process(self, source_name: str, channels: int):
+            if shutil.which("parecord"):
+                return subprocess.Popen(
+                    [
+                        "parecord",
+                        f"--device={source_name}",
+                        "--raw",
+                        "--rate=16000",
+                        f"--channels={max(1, channels)}",
+                        "--format=s16le",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=os.environ.copy(),
+                )
+            return subprocess.Popen(
+                [
+                    "pw-record",
+                    "--target",
+                    source_name,
+                    "--rate=16000",
+                    f"--channels={max(1, channels)}",
+                    "--format=s16",
+                    "-",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=os.environ.copy(),
+            )
 
         def _ducking_monitor_failed(self, message: str) -> None:
             self.ducking_enabled_var.set(False)
@@ -694,6 +1109,7 @@ def _run_gui() -> int:
                     self.backend.apply_live_strip_volume(source_key, self._effective_strip_volume(source_key))
                 except AudioBackendError:
                     continue
+            self._update_selected_strip_summary()
             if self.ducking_active:
                 self.status_var.set("Ducking active")
 
@@ -708,7 +1124,8 @@ def _run_gui() -> int:
 
             window = tk.Toplevel(self.root)
             window.title("Keybinds")
-            window.geometry("480x280")
+            window.geometry("720x460")
+            window.configure(bg=self.palette.bg)
             window.protocol("WM_DELETE_WINDOW", self.close_keybind_window)
             window.bind("<KeyPress>", self._capture_keybind)
             window.update_idletasks()
@@ -718,62 +1135,83 @@ def _run_gui() -> int:
             self.keybind_window = window
             self.keybind_value_vars = {}
 
-            frame = ttk.Frame(window, padding=12)
+            frame = ttk.Frame(window, style="Shell.TFrame", padding=20)
             frame.pack(fill="both", expand=True)
-            ttk.Label(frame, text="Select Fader Keybinds").grid(row=0, column=0, sticky="w")
-            ttk.Label(frame, text="Shortcut").grid(row=0, column=1, sticky="w", padx=(12, 0))
+            frame.columnconfigure(1, weight=1)
+            ttk.Label(frame, text="Keybinds", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(
+                frame,
+                text="Assign strip selection and selected-fader volume shortcuts.",
+                style="Subtitle.TLabel",
+            ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 18))
+
+            content = ttk.LabelFrame(frame, text="Bindings", style="Panel.TLabelframe", padding=16)
+            content.grid(row=2, column=0, columnspan=4, sticky="nsew")
+            content.columnconfigure(1, weight=1)
+            ttk.Label(content, text="Strip", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(content, text="Shortcut", style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
 
             for row_index, (source_key, default_label) in enumerate(self.route_rows, start=1):
                 label = self.strip_label_vars[source_key].get().strip() or default_label
-                ttk.Label(frame, text=label).grid(row=row_index, column=0, sticky="w", pady=(8, 0))
+                ttk.Label(content, text=label, style="Body.TLabel").grid(row=row_index, column=0, sticky="w", pady=(8, 0))
                 value_var = tk.StringVar(value=self.selection_keybinds.get(source_key, ""))
                 self.keybind_value_vars[source_key] = value_var
-                ttk.Label(frame, textvariable=value_var, width=18).grid(row=row_index, column=1, sticky="w", padx=(12, 12), pady=(8, 0))
+                ttk.Label(content, textvariable=value_var, width=18, style="Body.TLabel").grid(
+                    row=row_index, column=1, sticky="w", padx=(12, 12), pady=(8, 0)
+                )
                 ttk.Button(
-                    frame,
+                    content,
                     text="Set Key",
                     command=lambda source_key=source_key: self.begin_key_capture("select", source_key),
+                    style="Accent.TButton",
                 ).grid(row=row_index, column=2, pady=(8, 0))
                 ttk.Button(
-                    frame,
+                    content,
                     text="Clear",
                     command=lambda source_key=source_key: self.clear_selection_keybind(source_key),
+                    style="Ghost.TButton",
                 ).grid(row=row_index, column=3, padx=(8, 0), pady=(8, 0))
 
             volume_row = len(self.route_rows) + 2
-            ttk.Label(frame, text="Volume Controls").grid(row=volume_row, column=0, sticky="w", pady=(16, 0))
+            ttk.Label(content, text="Volume Controls", style="Section.TLabel").grid(
+                row=volume_row, column=0, sticky="w", pady=(16, 0)
+            )
 
             up_row = volume_row + 1
             self.volume_up_var = tk.StringVar(value=str(self.volume_keybinds.get("up", "")))
-            ttk.Label(frame, text="Selected Fader Up").grid(row=up_row, column=0, sticky="w", pady=(8, 0))
-            ttk.Label(frame, textvariable=self.volume_up_var, width=18).grid(
+            ttk.Label(content, text="Selected Fader Up", style="Body.TLabel").grid(
+                row=up_row, column=0, sticky="w", pady=(8, 0)
+            )
+            ttk.Label(content, textvariable=self.volume_up_var, width=18, style="Body.TLabel").grid(
                 row=up_row, column=1, sticky="w", padx=(12, 12), pady=(8, 0)
             )
-            ttk.Button(frame, text="Set Key", command=lambda: self.begin_key_capture("volume", "up")).grid(
+            ttk.Button(content, text="Set Key", command=lambda: self.begin_key_capture("volume", "up"), style="Accent.TButton").grid(
                 row=up_row, column=2, pady=(8, 0)
             )
-            ttk.Button(frame, text="Clear", command=lambda: self.clear_volume_keybind("up")).grid(
+            ttk.Button(content, text="Clear", command=lambda: self.clear_volume_keybind("up"), style="Ghost.TButton").grid(
                 row=up_row, column=3, padx=(8, 0), pady=(8, 0)
             )
 
             down_row = volume_row + 2
             self.volume_down_var = tk.StringVar(value=str(self.volume_keybinds.get("down", "")))
-            ttk.Label(frame, text="Selected Fader Down").grid(row=down_row, column=0, sticky="w", pady=(8, 0))
-            ttk.Label(frame, textvariable=self.volume_down_var, width=18).grid(
+            ttk.Label(content, text="Selected Fader Down", style="Body.TLabel").grid(
+                row=down_row, column=0, sticky="w", pady=(8, 0)
+            )
+            ttk.Label(content, textvariable=self.volume_down_var, width=18, style="Body.TLabel").grid(
                 row=down_row, column=1, sticky="w", padx=(12, 12), pady=(8, 0)
             )
-            ttk.Button(frame, text="Set Key", command=lambda: self.begin_key_capture("volume", "down")).grid(
+            ttk.Button(content, text="Set Key", command=lambda: self.begin_key_capture("volume", "down"), style="Accent.TButton").grid(
                 row=down_row, column=2, pady=(8, 0)
             )
-            ttk.Button(frame, text="Clear", command=lambda: self.clear_volume_keybind("down")).grid(
+            ttk.Button(content, text="Clear", command=lambda: self.clear_volume_keybind("down"), style="Ghost.TButton").grid(
                 row=down_row, column=3, padx=(8, 0), pady=(8, 0)
             )
 
             step_row = volume_row + 3
             self.volume_step_var = tk.IntVar(value=int(self.volume_keybinds.get("step_percent", 5)))
-            ttk.Label(frame, text="Step %").grid(row=step_row, column=0, sticky="w", pady=(8, 0))
+            ttk.Label(content, text="Step %", style="Body.TLabel").grid(row=step_row, column=0, sticky="w", pady=(8, 0))
             ttk.Spinbox(
-                frame,
+                content,
                 from_=1,
                 to=25,
                 textvariable=self.volume_step_var,
@@ -783,12 +1221,8 @@ def _run_gui() -> int:
             self.volume_step_trace_id = self.volume_step_var.trace_add("write", lambda *_args: self.save_volume_keybind_settings())
 
             self.keybind_status_var = tk.StringVar(value="Click Set Key, then press the shortcut you want.")
-            ttk.Label(frame, textvariable=self.keybind_status_var, justify="left").grid(
-                row=step_row + 1,
-                column=0,
-                columnspan=4,
-                sticky="w",
-                pady=(16, 0),
+            ttk.Label(content, textvariable=self.keybind_status_var, justify="left", style="Muted.TLabel").grid(
+                row=step_row + 1, column=0, columnspan=4, sticky="w", pady=(16, 0)
             )
             self.status_var.set("Keybind window opened.")
 
@@ -803,7 +1237,8 @@ def _run_gui() -> int:
 
             window = tk.Toplevel(self.root)
             window.title("Ducking")
-            window.geometry("420x180")
+            window.geometry("520x320")
+            window.configure(bg=self.palette.bg)
             window.protocol("WM_DELETE_WINDOW", self.close_ducking_window)
             window.update_idletasks()
             window.deiconify()
@@ -811,19 +1246,28 @@ def _run_gui() -> int:
             window.focus_set()
             self.ducking_window = window
 
-            frame = ttk.Frame(window, padding=12)
+            frame = ttk.Frame(window, style="Shell.TFrame", padding=20)
             frame.pack(fill="both", expand=True)
+            ttk.Label(frame, text="Ducking", style="Title.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+            ttk.Label(
+                frame,
+                text="Lower playback lanes while the selected microphone crosses the trigger threshold.",
+                style="Subtitle.TLabel",
+            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 18))
+
+            panel = ttk.LabelFrame(frame, text="Mic Trigger", style="Panel.TLabelframe", padding=16)
+            panel.grid(row=2, column=0, columnspan=2, sticky="nsew")
 
             ttk.Checkbutton(
-                frame,
+                panel,
                 text="Enable ducking while mic is active",
                 variable=self.ducking_enabled_var,
                 command=self.toggle_ducking,
             ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-            ttk.Label(frame, text="Trigger Input").grid(row=1, column=0, sticky="w", pady=(12, 0))
+            ttk.Label(panel, text="Trigger Input", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=(12, 0))
             ducking_source_combo = ttk.Combobox(
-                frame,
+                panel,
                 textvariable=self.ducking_source_var,
                 state="readonly",
                 values=["Hardware In 1", "Hardware In 2"],
@@ -832,9 +1276,9 @@ def _run_gui() -> int:
             ducking_source_combo.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(12, 0))
             ducking_source_combo.bind("<<ComboboxSelected>>", lambda _event: self._ducking_source_changed())
 
-            ttk.Label(frame, text="Duck Amount %").grid(row=2, column=0, sticky="w", pady=(12, 0))
+            ttk.Label(panel, text="Duck Amount %", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 0))
             ttk.Spinbox(
-                frame,
+                panel,
                 from_=5,
                 to=90,
                 textvariable=self.ducking_amount_var,
@@ -842,9 +1286,9 @@ def _run_gui() -> int:
                 command=self._update_ducking_config,
             ).grid(row=2, column=1, sticky="w", padx=(12, 0), pady=(12, 0))
 
-            ttk.Label(frame, text="Threshold %").grid(row=3, column=0, sticky="w", pady=(12, 0))
+            ttk.Label(panel, text="Threshold %", style="Body.TLabel").grid(row=3, column=0, sticky="w", pady=(12, 0))
             ttk.Spinbox(
-                frame,
+                panel,
                 from_=1,
                 to=60,
                 textvariable=self.ducking_threshold_var,
@@ -853,8 +1297,9 @@ def _run_gui() -> int:
             ).grid(row=3, column=1, sticky="w", padx=(12, 0), pady=(12, 0))
 
             ttk.Label(
-                frame,
+                panel,
                 text="Ducking lowers System Playback, Input 1, and Input 2 while the chosen mic is active.",
+                style="Muted.TLabel",
                 justify="left",
                 wraplength=380,
             ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(16, 0))
@@ -873,7 +1318,8 @@ def _run_gui() -> int:
 
             window = tk.Toplevel(self.root)
             window.title("Apps")
-            window.geometry("860x420")
+            window.geometry("1040x560")
+            window.configure(bg=self.palette.bg)
             window.protocol("WM_DELETE_WINDOW", self.close_apps_window)
             window.update_idletasks()
             window.deiconify()
@@ -881,17 +1327,25 @@ def _run_gui() -> int:
             window.focus_set()
             self.apps_window = window
 
-            outer = ttk.Frame(window, padding=12)
+            outer = ttk.Frame(window, style="Shell.TFrame", padding=20)
             outer.pack(fill="both", expand=True)
+            outer.columnconfigure(0, weight=1)
 
-            controls = ttk.Frame(outer)
+            ttk.Label(outer, text="Apps", style="Title.TLabel").pack(anchor="w")
+            ttk.Label(
+                outer,
+                text="Route active playback streams to VM_System, VM_Input_1, or VM_Input_2 without changing backend behavior.",
+                style="Subtitle.TLabel",
+            ).pack(anchor="w", pady=(4, 18))
+
+            controls = ttk.Frame(outer, style="Toolbar.TFrame")
             controls.pack(fill="x")
-            ttk.Button(controls, text="Refresh", command=self.refresh_apps_window).pack(side="left")
-            ttk.Button(controls, text="Apply Saved Rules", command=self.apply_saved_app_assignments).pack(
+            ttk.Button(controls, text="Refresh", command=self.refresh_apps_window, style="Ghost.TButton").pack(side="left")
+            ttk.Button(controls, text="Apply Saved Rules", command=self.apply_saved_app_assignments, style="Accent.TButton").pack(
                 side="left", padx=(8, 0)
             )
 
-            self.apps_content_frame = ttk.Frame(outer)
+            self.apps_content_frame = ttk.Frame(outer, style="Surface.TFrame")
             self.apps_content_frame.pack(fill="both", expand=True, pady=(12, 0))
             self.refresh_apps_window()
             self.status_var.set("Apps window opened.")
@@ -905,28 +1359,29 @@ def _run_gui() -> int:
             try:
                 streams = self.backend.list_app_streams()
             except AudioBackendError as exc:
-                ttk.Label(self.apps_content_frame, text=str(exc), justify="left").pack(anchor="w")
+                ttk.Label(self.apps_content_frame, text=str(exc), justify="left", style="Muted.TLabel").pack(anchor="w")
                 self.status_var.set(str(exc))
                 return
 
-            header = ttk.Frame(self.apps_content_frame)
+            header = ttk.Frame(self.apps_content_frame, style="Panel.TFrame", padding=12)
             header.pack(fill="x")
-            ttk.Label(header, text="App", width=22).grid(row=0, column=0, sticky="w")
-            ttk.Label(header, text="Stream", width=28).grid(row=0, column=1, sticky="w", padx=(12, 0))
-            ttk.Label(header, text="Current Sink", width=34).grid(row=0, column=2, sticky="w", padx=(12, 0))
-            ttk.Label(header, text="Assign To", width=18).grid(row=0, column=3, sticky="w", padx=(12, 0))
+            ttk.Label(header, text="App", width=22, style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(header, text="Stream", width=28, style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
+            ttk.Label(header, text="Current Sink", width=34, style="Muted.TLabel").grid(row=0, column=2, sticky="w", padx=(12, 0))
+            ttk.Label(header, text="Assign To", width=18, style="Muted.TLabel").grid(row=0, column=3, sticky="w", padx=(12, 0))
 
             if not streams:
                 ttk.Label(
                     self.apps_content_frame,
                     text="No active playback app streams found.",
                     justify="left",
+                    style="Muted.TLabel",
                 ).pack(anchor="w", pady=(12, 0))
                 return
 
             options = list(self.APP_ASSIGNMENT_LABELS.values())
             for stream in streams:
-                row = ttk.Frame(self.apps_content_frame)
+                row = ttk.Frame(self.apps_content_frame, style="Panel.TFrame", padding=12)
                 row.pack(fill="x", pady=(8, 0))
 
                 assignment_value = self._app_assignment_source_key_to_label(self.app_assignments.get(stream.app_id, ""))
@@ -934,12 +1389,13 @@ def _run_gui() -> int:
                     assignment_value = self._current_app_sink_label(stream.sink_name)
                 assignment_var = tk.StringVar(value=assignment_value)
 
-                ttk.Label(row, text=stream.app_name, width=22).grid(row=0, column=0, sticky="w")
-                ttk.Label(row, text=stream.stream_name, width=28).grid(row=0, column=1, sticky="w", padx=(12, 0))
+                ttk.Label(row, text=stream.app_name, width=22, style="Body.TLabel").grid(row=0, column=0, sticky="w")
+                ttk.Label(row, text=stream.stream_name, width=28, style="Body.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
                 ttk.Label(
                     row,
                     text=self._current_app_sink_label(stream.sink_name) or "unknown",
                     width=34,
+                    style="Muted.TLabel",
                 ).grid(row=0, column=2, sticky="w", padx=(12, 0))
                 combo = ttk.Combobox(row, textvariable=assignment_var, values=options, state="readonly", width=16)
                 combo.grid(row=0, column=3, sticky="w", padx=(12, 0))
@@ -947,11 +1403,13 @@ def _run_gui() -> int:
                     row,
                     text="Assign",
                     command=lambda stream=stream, assignment_var=assignment_var: self.assign_app_stream(stream, assignment_var),
+                    style="Accent.TButton",
                 ).grid(row=0, column=4, padx=(12, 0))
                 ttk.Button(
                     row,
                     text="Clear Rule",
                     command=lambda app_id=stream.app_id: self.clear_app_assignment(app_id),
+                    style="Ghost.TButton",
                 ).grid(row=0, column=5, padx=(8, 0))
 
         def close_keybind_window(self) -> None:
@@ -1306,6 +1764,8 @@ def _run_gui() -> int:
                     self.backend.apply_app_assignments(self.app_assignments)
                 except AudioBackendError as exc:
                     self.status_var.set(str(exc))
+            self._refresh_strip_metadata()
+            self._restart_meter_workers()
 
         def create_virtual_devices(self) -> None:
             try:
@@ -1401,11 +1861,13 @@ def _run_gui() -> int:
                 self._show_backend_error(str(exc))
                 return
             self.strip_volume_vars[source_key].set(volume)
+            self.strip_volume_readout_vars[source_key].set(f"{int(volume)}%")
             if self.ducking_enabled_var.get() and source_key in self.DUCKED_SOURCE_KEYS:
                 try:
                     self.backend.apply_live_strip_volume(source_key, self._effective_strip_volume(source_key))
                 except AudioBackendError as exc:
                     self._show_backend_error(str(exc))
+            self._update_selected_strip_summary()
 
         def run_in_background(self, action) -> None:
             thread = threading.Thread(target=action, daemon=True)
@@ -1466,11 +1928,11 @@ def _run_gui() -> int:
             self.close_ducking_window()
             self.close_apps_window()
             self._stop_ducking_monitor()
+            self._stop_meter_workers()
             self._stop_command_server()
             self.root.destroy()
 
     root = tk.Tk()
-    ttk.Style().theme_use("clam")
     MixerApp(root)
     root.mainloop()
     return 0
