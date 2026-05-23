@@ -571,9 +571,6 @@ def _run_gui() -> int:
             ttk.Label(self.status_bar, textvariable=self.status_var, style="Status.TLabel").grid(
                 row=0, column=0, sticky="w"
             )
-            ttk.Label(self.status_bar, text="Remote control socket active", style="Badge.TLabel").grid(
-                row=0, column=1, sticky="e"
-            )
 
             self._refresh_strip_metadata()
             self._queue_strip_layout()
@@ -1729,9 +1726,6 @@ def _run_gui() -> int:
                 server.bind(str(CONTROL_SOCKET_PATH))
                 server.listen()
                 server.settimeout(0.5)
-            except OSError as exc:
-                self.status_var.set(f"Remote control disabled: {exc}")
-                return
 
             self.command_server_socket = server
             self.command_server_thread = threading.Thread(target=self._command_server_loop, daemon=True)
