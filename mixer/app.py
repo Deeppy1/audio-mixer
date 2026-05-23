@@ -1726,6 +1726,8 @@ def _run_gui() -> int:
                 server.bind(str(CONTROL_SOCKET_PATH))
                 server.listen()
                 server.settimeout(0.5)
+            except OSError as exc:
+                return
 
             self.command_server_socket = server
             self.command_server_thread = threading.Thread(target=self._command_server_loop, daemon=True)
