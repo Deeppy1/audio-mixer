@@ -25,7 +25,7 @@ class MixerPalette:
     danger: str = "#FF6D8B"
     meter_low: str = "#1DD6A2"
     meter_mid: str = "#6CD8FF"
-    meter_high: str = "#B47CFF"
+    meter_high: str = "#ff7cc4"
 
 
 PALETTE = MixerPalette()
