@@ -7,3 +7,4 @@ __pycache__/
 *.pyc
 .mixer-state.json
 mixer-config.json
+run_state.json
