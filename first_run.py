@@ -2,9 +2,8 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from packaging.version import Version
 
-REQUIRED_PIPEWIRE_VERSION = Version("1.6.5")
+REQUIRED_PIPEWIRE_VERSION = (1, 6, 5)
 
 STATE_FILE = Path("run_state.json")
 
@@ -71,8 +70,16 @@ def get_package_manager():
     return None
 
 
-def is_package_installed(package_name):
-    return shutil.which(package_name) is not None
+def is_binary_installed(binary_name):
+    return shutil.which(binary_name) is not None
+
+
+def version_tuple(version_string):
+    return tuple(
+        int(part)
+        for part in version_string.split(".")
+        if part.isdigit()
+    )
 
 
 def get_missing_packages(manager):
@@ -92,6 +99,7 @@ def get_missing_packages(manager):
         if package == "tk":
             try:
                 import tkinter
+
             except ImportError:
                 missing.append(
                     PACKAGE_MAP[manager]["packages"][package]
@@ -99,7 +107,8 @@ def get_missing_packages(manager):
 
             continue
 
-        if not is_package_installed(binary):
+        # binary checks
+        if not is_binary_installed(binary):
             missing.append(
                 PACKAGE_MAP[manager]["packages"][package]
             )
@@ -118,12 +127,15 @@ def check_pipewire_version():
         for line in result.stdout.splitlines():
             if "libpipewire" in line:
                 version_text = line.split()[-1]
-                version = Version(version_text)
 
-                if version < REQUIRED_PIPEWIRE_VERSION:
-                    return False
+                current_version = version_tuple(
+                    version_text
+                )
 
-                return True
+                return (
+                    current_version >=
+                    REQUIRED_PIPEWIRE_VERSION
+                )
 
     except Exception:
         pass
@@ -141,14 +153,14 @@ def install_packages(manager, packages):
         subprocess.run(command, check=True)
 
         print(
-            "\\nPackages installed/updated successfully"
+            "\nPackages installed/updated successfully"
         )
 
         return True
 
     except subprocess.CalledProcessError:
         print(
-            "\\nFailed to install/update packages"
+            "\nFailed to install/update packages"
         )
 
         return False
@@ -170,7 +182,7 @@ def check_dependencies():
 
     missing_packages = get_missing_packages(manager)
 
-    # Separate PipeWire version check
+    # PipeWire version check
     if (
         "pipewire" not in missing_packages and
         not check_pipewire_version()
@@ -179,16 +191,19 @@ def check_dependencies():
             PACKAGE_MAP[manager]["packages"]["pipewire"]
         )
 
+    # Remove duplicates
+    missing_packages = list(set(missing_packages))
+
     if missing_packages:
         print(
-            "\\nMissing/outdated packages:"
+            "\nMissing/outdated packages:"
         )
 
         for package in missing_packages:
             print(f" - {package}")
 
         response = input(
-            "\\nInstall/update now? [Y/n]: "
+            "\nInstall/update now? [Y/n]: "
         ).strip().lower()
 
         if response in ("", "y", "yes"):
@@ -199,7 +214,7 @@ def check_dependencies():
 
     else:
         print(
-            "All dependencies are installed"
+            "All packages are up to date/installed"
         )
 
     state["first_run"] = False
