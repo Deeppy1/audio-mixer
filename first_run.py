@@ -4,9 +4,44 @@ import subprocess
 from pathlib import Path
 from packaging.version import Version
 
-REQUIRED_VERSION = Version("1.6.5")
+REQUIRED_PIPEWIRE_VERSION = Version("1.6.5")
 
 STATE_FILE = Path("run_state.json")
+
+PACKAGE_MAP = {
+    "apt": {
+        "install": ["sudo", "apt", "install", "-y"],
+        "packages": {
+            "pipewire": "pipewire",
+            "pulseaudio-utils": "pulseaudio-utils",
+            "ffmpeg": "ffmpeg",
+            "curl": "curl",
+            "tk": "python3-tk",
+        },
+    },
+
+    "pacman": {
+        "install": ["sudo", "pacman", "-S", "--noconfirm"],
+        "packages": {
+            "pipewire": "pipewire",
+            "pulseaudio-utils": "libpulse",
+            "ffmpeg": "ffmpeg",
+            "curl": "curl",
+            "tk": "tk",
+        },
+    },
+
+    "dnf": {
+        "install": ["sudo", "dnf", "install", "-y"],
+        "packages": {
+            "pipewire": "pipewire",
+            "pulseaudio-utils": "pulseaudio-utils",
+            "ffmpeg": "ffmpeg",
+            "curl": "curl",
+            "tk": "python3-tkinter",
+        },
+    },
+}
 
 
 def load_state():
@@ -14,6 +49,7 @@ def load_state():
         try:
             with open(STATE_FILE, "r") as f:
                 return json.load(f)
+
         except Exception:
             pass
 
@@ -27,80 +63,148 @@ def save_state(state):
         json.dump(state, f, indent=4)
 
 
-def get_distro_package_manager():
-    managers = {
-        "apt": ["sudo", "apt", "install", "-y", "pipewire"],
-        "pacman": ["sudo", "pacman", "-S", "--noconfirm", "pipewire"],
-        "dnf": ["sudo", "dnf", "install", "-y", "pipewire"],
-    }
-
-    for manager in managers:
+def get_package_manager():
+    for manager in PACKAGE_MAP:
         if shutil.which(manager):
-            return managers[manager]
+            return manager
 
     return None
 
 
-def install_or_update_pipewire():
-    command = get_distro_package_manager()
+def is_package_installed(package_name):
+    return shutil.which(package_name) is not None
 
-    if not command:
-        print("Unsupported distro/package manager")
-        return False
+
+def get_missing_packages(manager):
+    missing = []
+
+    package_checks = {
+        "pipewire": "pipewire",
+        "pulseaudio-utils": "pactl",
+        "ffmpeg": "ffmpeg",
+        "curl": "curl",
+        "tk": None,
+    }
+
+    for package, binary in package_checks.items():
+
+        # tkinter check
+        if package == "tk":
+            try:
+                import tkinter
+            except ImportError:
+                missing.append(
+                    PACKAGE_MAP[manager]["packages"][package]
+                )
+
+            continue
+
+        if not is_package_installed(binary):
+            missing.append(
+                PACKAGE_MAP[manager]["packages"][package]
+            )
+
+    return missing
+
+
+def check_pipewire_version():
+    try:
+        result = subprocess.run(
+            ["pipewire", "--version"],
+            capture_output=True,
+            text=True
+        )
+
+        for line in result.stdout.splitlines():
+            if "libpipewire" in line:
+                version_text = line.split()[-1]
+                version = Version(version_text)
+
+                if version < REQUIRED_PIPEWIRE_VERSION:
+                    return False
+
+                return True
+
+    except Exception:
+        pass
+
+    return False
+
+
+def install_packages(manager, packages):
+    command = (
+        PACKAGE_MAP[manager]["install"] +
+        packages
+    )
 
     try:
         subprocess.run(command, check=True)
-        print("PipeWire installed/updated successfully")
+
+        print(
+            "\\nPackages installed/updated successfully"
+        )
+
         return True
 
     except subprocess.CalledProcessError:
-        print("Failed to install/update PipeWire")
+        print(
+            "\\nFailed to install/update packages"
+        )
+
         return False
 
 
-def check_pipewire():
+def check_dependencies():
     state = load_state()
 
     if not state["first_run"]:
         return
 
-    pipewire_installed = shutil.which("pipewire") is not None
-    needs_update = False
-    version = None
+    manager = get_package_manager()
 
-    if pipewire_installed:
-        try:
-            result = subprocess.run(
-                ["pipewire", "--version"],
-                capture_output=True,
-                text=True
-            )
+    if not manager:
+        print(
+            "Unsupported distro/package manager"
+        )
+        return
 
-            for line in result.stdout.splitlines():
-                if "libpipewire" in line:
-                    version_text = line.split()[-1]
-                    version = Version(version_text)
-                    break
+    missing_packages = get_missing_packages(manager)
 
-            if version is None or version < REQUIRED_VERSION:
-                needs_update = True
+    # Separate PipeWire version check
+    if (
+        "pipewire" not in missing_packages and
+        not check_pipewire_version()
+    ):
+        missing_packages.append(
+            PACKAGE_MAP[manager]["packages"]["pipewire"]
+        )
 
-        except Exception:
-            needs_update = True
+    if missing_packages:
+        print(
+            "\\nMissing/outdated packages:"
+        )
 
-    else:
-        needs_update = True
+        for package in missing_packages:
+            print(f" - {package}")
 
-    if needs_update:
         response = input(
-            "PipeWire is missing or outdated. Install/update now? [Y/n]: "
+            "\\nInstall/update now? [Y/n]: "
         ).strip().lower()
 
         if response in ("", "y", "yes"):
-            install_or_update_pipewire()
+            install_packages(
+                manager,
+                missing_packages
+            )
 
     else:
-        print(f"PipeWire OK ({version})")
+        print(
+            "All dependencies are installed"
+        )
 
     state["first_run"] = False
     save_state(state)
+
+
+if __name__ == "__main__":
+    check_dependencies()

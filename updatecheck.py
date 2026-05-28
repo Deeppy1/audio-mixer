@@ -19,7 +19,10 @@ def version_tuple(v):
 def updatecheck():
     url = "https://raw.githubusercontent.com/Deeppy1/audio-mixer/main/version.py"
 
-    webtext = urlopen(url).read().decode()
+    try:
+        webtext = urlopen(url, timeout=3).read().decode()
+    except Exception:
+        return "No internet connection or update server unreachable"
     webversion = extract_version(webtext)
 
     print("Web version:", webversion)
