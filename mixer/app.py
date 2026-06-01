@@ -257,6 +257,65 @@ def _run_gui() -> int:
     from .ui_theme import PALETTE, apply_theme
     from .ui_widgets import AnimatedLevelMeter, NeonToggle
 
+    class ScrollableFrame(ttk.Frame):
+        def __init__(self, master, *, bg: str, content_style: str, width: int | None = None) -> None:
+            super().__init__(master)
+            self.canvas = tk.Canvas(self, bg=bg, bd=0, highlightthickness=0, width=width)
+            self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+            self.content = ttk.Frame(self.canvas, style=content_style)
+            self.content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+            self.can_scroll = False
+
+            self.canvas.configure(yscrollcommand=self.scrollbar.set)
+            self.canvas.grid(row=0, column=0, sticky="nsew")
+            self.columnconfigure(0, weight=1)
+            self.rowconfigure(0, weight=1)
+
+            self.content.bind("<Configure>", self._sync_scrollregion)
+            self.canvas.bind("<Configure>", self._sync_canvas_width)
+            self.canvas.bind("<Enter>", self._bind_mousewheel)
+            self.canvas.bind("<Leave>", self._unbind_mousewheel)
+
+        def _sync_scrollregion(self, _event=None) -> None:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            self._sync_scrollbar()
+
+        def _sync_canvas_width(self, event) -> None:
+            self.canvas.itemconfigure(self.content_window, width=event.width)
+            self._sync_scrollbar()
+
+        def _sync_scrollbar(self) -> None:
+            self.update_idletasks()
+            content_height = self.content.winfo_reqheight()
+            canvas_height = self.canvas.winfo_height()
+            self.can_scroll = content_height > canvas_height
+            if self.can_scroll:
+                self.scrollbar.grid(row=0, column=1, sticky="ns")
+            else:
+                self.scrollbar.grid_remove()
+                self.canvas.yview_moveto(0)
+
+        def _bind_mousewheel(self, _event=None) -> None:
+            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+            self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+            self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+        def _unbind_mousewheel(self, _event=None) -> None:
+            self.canvas.unbind_all("<MouseWheel>")
+            self.canvas.unbind_all("<Button-4>")
+            self.canvas.unbind_all("<Button-5>")
+
+        def _on_mousewheel(self, event) -> None:
+            if not self.can_scroll:
+                return
+            if getattr(event, "num", None) == 4:
+                delta = -1
+            elif getattr(event, "num", None) == 5:
+                delta = 1
+            else:
+                delta = -1 * int(event.delta / 120)
+            self.canvas.yview_scroll(delta, "units")
+
     class MixerApp:
         ROUTE_TARGETS = ("A1", "A2", "B1", "B2")
         DUCKED_SOURCE_KEYS = ("system_playback", "virtual_input_1", "virtual_input_2")
@@ -279,8 +338,8 @@ def _run_gui() -> int:
             self.palette = PALETTE
             self.style = apply_theme(self.root)
             self.root.title("Audio Mixer Studio")
-            self.root.geometry("1460x880")
-            self.root.minsize(1180, 760)
+            self.root.geometry("1280x760")
+            self.root.minsize(960, 620)
             self.root.protocol("WM_DELETE_WINDOW", self.close)
 
             self.status_var = tk.StringVar(value="Ready")
@@ -398,7 +457,7 @@ def _run_gui() -> int:
             self._restart_meter_workers()
 
         def _build_ui(self) -> None:
-            shell = ttk.Frame(self.root, style="Shell.TFrame", padding=20)
+            shell = ttk.Frame(self.root, style="Shell.TFrame", padding=14)
             shell.pack(fill="both", expand=True)
             shell.columnconfigure(1, weight=1)
             shell.rowconfigure(1, weight=1)
@@ -417,7 +476,7 @@ def _run_gui() -> int:
             ).pack(anchor="w", pady=(4, 0))
 
             action_bar = ttk.Frame(header, style="Toolbar.TFrame")
-            action_bar.grid(row=0, column=1, sticky="e")
+            action_bar.grid(row=1, column=0, sticky="w", pady=(12, 0))
             ttk.Button(
                 action_bar,
                 text="Create / Repair Virtual Devices",
@@ -441,10 +500,16 @@ def _run_gui() -> int:
             ttk.Button(action_bar, text="Keybinds", command=self.open_keybind_window).pack(side="left", padx=(0, 10))
             ttk.Button(action_bar, text="Ducking", command=self.open_ducking_window).pack(side="left")
 
-            sidebar = ttk.Frame(shell, style="Panel.TFrame", padding=18)
-            sidebar.grid(row=1, column=0, sticky="nsew", padx=(0, 18))
-            sidebar.configure(width=320)
-            sidebar.grid_propagate(False)
+            sidebar_shell = ttk.Frame(shell, style="Panel.TFrame", padding=(14, 14, 8, 14))
+            sidebar_shell.grid(row=1, column=0, sticky="nsew", padx=(0, 14))
+            sidebar_shell.configure(width=320)
+            sidebar_shell.grid_propagate(False)
+            sidebar_shell.columnconfigure(0, weight=1)
+            sidebar_shell.rowconfigure(0, weight=1)
+
+            sidebar_scroll = ScrollableFrame(sidebar_shell, bg=self.palette.panel, content_style="Panel.TFrame", width=286)
+            sidebar_scroll.grid(row=0, column=0, sticky="nsew")
+            sidebar = sidebar_scroll.content
             sidebar.columnconfigure(0, weight=1)
 
             ttk.Label(sidebar, text="Bus Targets", style="Section.TLabel").grid(row=0, column=0, sticky="w")
@@ -529,7 +594,7 @@ def _run_gui() -> int:
             )
 
             status_panel = ttk.LabelFrame(sidebar, text="Session", style="Panel.TLabelframe", padding=14)
-            status_panel.grid(row=4, column=0, sticky="nsew")
+            status_panel.grid(row=4, column=0, sticky="ew")
             status_panel.columnconfigure(0, weight=1)
 
             status = updatecheck()
@@ -558,8 +623,9 @@ def _run_gui() -> int:
                 style="Subtitle.TLabel",
             ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
-            self.strip_grid_frame = ttk.Frame(mixer_shell, style="Surface.TFrame")
-            self.strip_grid_frame.grid(row=1, column=0, sticky="nsew")
+            self.strip_scroll = ScrollableFrame(mixer_shell, bg=self.palette.bg_alt, content_style="Surface.TFrame")
+            self.strip_scroll.grid(row=1, column=0, sticky="nsew")
+            self.strip_grid_frame = self.strip_scroll.content
             self.strip_grid_frame.bind("<Configure>", lambda _event: self._queue_strip_layout())
 
             for row_index, (source_key, label) in enumerate(self.route_rows, start=1):
@@ -701,10 +767,14 @@ def _run_gui() -> int:
 
             for child in self.strip_grid_frame.winfo_children():
                 child.grid_forget()
+            for index in range(len(self.route_rows)):
+                self.strip_grid_frame.columnconfigure(index, weight=0, uniform="")
+                self.strip_grid_frame.rowconfigure(index, weight=0)
             for index, (source_key, _label) in enumerate(self.route_rows):
                 row = index // column_count
                 column = index % column_count
                 self.strip_card_frames[source_key].grid(row=row, column=column, sticky="nsew", padx=8, pady=8)
+                self.strip_grid_frame.rowconfigure(row, weight=1)
             for column in range(column_count):
                 self.strip_grid_frame.columnconfigure(column, weight=1, uniform="strip")
 
