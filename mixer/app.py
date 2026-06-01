@@ -257,65 +257,6 @@ def _run_gui() -> int:
     from .ui_theme import PALETTE, apply_theme
     from .ui_widgets import AnimatedLevelMeter, NeonToggle
 
-    class ScrollableFrame(ttk.Frame):
-        def __init__(self, master, *, bg: str, content_style: str, width: int | None = None) -> None:
-            super().__init__(master)
-            self.canvas = tk.Canvas(self, bg=bg, bd=0, highlightthickness=0, width=width)
-            self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-            self.content = ttk.Frame(self.canvas, style=content_style)
-            self.content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
-            self.can_scroll = False
-
-            self.canvas.configure(yscrollcommand=self.scrollbar.set)
-            self.canvas.grid(row=0, column=0, sticky="nsew")
-            self.columnconfigure(0, weight=1)
-            self.rowconfigure(0, weight=1)
-
-            self.content.bind("<Configure>", self._sync_scrollregion)
-            self.canvas.bind("<Configure>", self._sync_canvas_width)
-            self.canvas.bind("<Enter>", self._bind_mousewheel)
-            self.canvas.bind("<Leave>", self._unbind_mousewheel)
-
-        def _sync_scrollregion(self, _event=None) -> None:
-            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-            self._sync_scrollbar()
-
-        def _sync_canvas_width(self, event) -> None:
-            self.canvas.itemconfigure(self.content_window, width=event.width)
-            self._sync_scrollbar()
-
-        def _sync_scrollbar(self) -> None:
-            self.update_idletasks()
-            content_height = self.content.winfo_reqheight()
-            canvas_height = self.canvas.winfo_height()
-            self.can_scroll = content_height > canvas_height
-            if self.can_scroll:
-                self.scrollbar.grid(row=0, column=1, sticky="ns")
-            else:
-                self.scrollbar.grid_remove()
-                self.canvas.yview_moveto(0)
-
-        def _bind_mousewheel(self, _event=None) -> None:
-            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-            self.canvas.bind_all("<Button-4>", self._on_mousewheel)
-            self.canvas.bind_all("<Button-5>", self._on_mousewheel)
-
-        def _unbind_mousewheel(self, _event=None) -> None:
-            self.canvas.unbind_all("<MouseWheel>")
-            self.canvas.unbind_all("<Button-4>")
-            self.canvas.unbind_all("<Button-5>")
-
-        def _on_mousewheel(self, event) -> None:
-            if not self.can_scroll:
-                return
-            if getattr(event, "num", None) == 4:
-                delta = -1
-            elif getattr(event, "num", None) == 5:
-                delta = 1
-            else:
-                delta = -1 * int(event.delta / 120)
-            self.canvas.yview_scroll(delta, "units")
-
     class MixerApp:
         ROUTE_TARGETS = ("A1", "A2", "B1", "B2")
         DUCKED_SOURCE_KEYS = ("system_playback", "virtual_input_1", "virtual_input_2")
@@ -459,11 +400,11 @@ def _run_gui() -> int:
         def _build_ui(self) -> None:
             shell = ttk.Frame(self.root, style="Shell.TFrame", padding=14)
             shell.pack(fill="both", expand=True)
-            shell.columnconfigure(1, weight=1)
+            shell.columnconfigure(0, weight=1)
             shell.rowconfigure(1, weight=1)
 
             header = ttk.Frame(shell, style="Toolbar.TFrame")
-            header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
+            header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
             header.columnconfigure(0, weight=1)
 
             title_block = ttk.Frame(header, style="Toolbar.TFrame")
@@ -500,21 +441,43 @@ def _run_gui() -> int:
             ttk.Button(action_bar, text="Keybinds", command=self.open_keybind_window).pack(side="left", padx=(0, 10))
             ttk.Button(action_bar, text="Ducking", command=self.open_ducking_window).pack(side="left")
 
-            sidebar_shell = ttk.Frame(shell, style="Panel.TFrame", padding=(14, 14, 8, 14))
-            sidebar_shell.grid(row=1, column=0, sticky="nsew", padx=(0, 14))
-            sidebar_shell.configure(width=320)
-            sidebar_shell.grid_propagate(False)
-            sidebar_shell.columnconfigure(0, weight=1)
-            sidebar_shell.rowconfigure(0, weight=1)
+            main_panes = ttk.PanedWindow(shell, orient=tk.VERTICAL)
+            main_panes.grid(row=1, column=0, sticky="nsew")
 
-            sidebar_scroll = ScrollableFrame(sidebar_shell, bg=self.palette.panel, content_style="Panel.TFrame", width=286)
-            sidebar_scroll.grid(row=0, column=0, sticky="nsew")
-            sidebar = sidebar_scroll.content
-            sidebar.columnconfigure(0, weight=1)
+            mixer_shell = ttk.Frame(main_panes, style="Surface.TFrame")
+            mixer_shell.columnconfigure(0, weight=1)
+            mixer_shell.rowconfigure(1, weight=1)
+            main_panes.add(mixer_shell, weight=1)
 
-            ttk.Label(sidebar, text="Bus Targets", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-            outputs_panel = ttk.LabelFrame(sidebar, text="Outputs", style="Panel.TLabelframe", padding=14)
-            outputs_panel.grid(row=1, column=0, sticky="ew", pady=(12, 14))
+            mix_header = ttk.Frame(mixer_shell, style="Surface.TFrame")
+            mix_header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            mix_header.columnconfigure(0, weight=1)
+            ttk.Label(mix_header, text="Routing Matrix", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(
+                mix_header,
+                text="Editable strip labels, mute/solo, responsive channel cards, and illuminated A/B bus routing.",
+                style="Subtitle.TLabel",
+            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+            self.strip_grid_frame = ttk.Frame(mixer_shell, style="Surface.TFrame")
+            self.strip_grid_frame.grid(row=1, column=0, sticky="nsew")
+            self.strip_grid_frame.bind("<Configure>", lambda _event: self._queue_strip_layout())
+
+            for row_index, (source_key, label) in enumerate(self.route_rows, start=1):
+                self._create_strip_card(source_key, label, row_index)
+
+            bottom_shell = ttk.Frame(main_panes, style="Panel.TFrame")
+            bottom_shell.columnconfigure(0, weight=1)
+            bottom_shell.rowconfigure(0, weight=1)
+            main_panes.add(bottom_shell, weight=0)
+
+            control_tray = ttk.Frame(bottom_shell, style="Panel.TFrame", padding=12)
+            control_tray.grid(row=0, column=0, sticky="nsew")
+            for column in range(4):
+                control_tray.columnconfigure(column, weight=1, uniform="control")
+
+            outputs_panel = ttk.LabelFrame(control_tray, text="Outputs", style="Panel.TLabelframe", padding=10)
+            outputs_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
             outputs_panel.columnconfigure(0, weight=1)
 
             ttk.Label(outputs_panel, text="A1 Physical Output", style="Body.TLabel").grid(row=0, column=0, sticky="w")
@@ -539,8 +502,8 @@ def _run_gui() -> int:
                 style="Ghost.TButton",
             ).grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
 
-            inputs_panel = ttk.LabelFrame(sidebar, text="Hardware Inputs", style="Panel.TLabelframe", padding=14)
-            inputs_panel.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+            inputs_panel = ttk.LabelFrame(control_tray, text="Hardware Inputs", style="Panel.TLabelframe", padding=10)
+            inputs_panel.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
             inputs_panel.columnconfigure(0, weight=1)
 
             ttk.Label(inputs_panel, text="Hardware In 1", style="Body.TLabel").grid(row=0, column=0, sticky="w")
@@ -565,8 +528,8 @@ def _run_gui() -> int:
                 style="Ghost.TButton",
             ).grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
 
-            monitor_panel = ttk.LabelFrame(sidebar, text="Monitoring", style="Panel.TLabelframe", padding=14)
-            monitor_panel.grid(row=3, column=0, sticky="ew", pady=(0, 14))
+            monitor_panel = ttk.LabelFrame(control_tray, text="Monitoring", style="Panel.TLabelframe", padding=10)
+            monitor_panel.grid(row=0, column=2, sticky="nsew", padx=(0, 8))
             monitor_panel.columnconfigure(0, weight=1)
             ttk.Label(monitor_panel, text="Selected Strip", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
             ttk.Label(monitor_panel, textvariable=self.selected_strip_label_var, style="Section.TLabel").grid(
@@ -593,8 +556,8 @@ def _run_gui() -> int:
                 row=7, column=0, sticky="w"
             )
 
-            status_panel = ttk.LabelFrame(sidebar, text="Session", style="Panel.TLabelframe", padding=14)
-            status_panel.grid(row=4, column=0, sticky="ew")
+            status_panel = ttk.LabelFrame(control_tray, text="Session", style="Panel.TLabelframe", padding=10)
+            status_panel.grid(row=0, column=3, sticky="nsew")
             status_panel.columnconfigure(0, weight=1)
 
             status = updatecheck()
@@ -608,41 +571,19 @@ def _run_gui() -> int:
                 row=0, column=0, sticky="w"
             )
 
-            mixer_shell = ttk.Frame(shell, style="Surface.TFrame")
-            mixer_shell.grid(row=1, column=1, sticky="nsew")
-            mixer_shell.columnconfigure(0, weight=1)
-            mixer_shell.rowconfigure(1, weight=1)
-
-            mix_header = ttk.Frame(mixer_shell, style="Surface.TFrame")
-            mix_header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
-            mix_header.columnconfigure(0, weight=1)
-            ttk.Label(mix_header, text="Routing Matrix", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(
-                mix_header,
-                text="Editable strip labels, mute/solo, responsive channel cards, and illuminated A/B bus routing.",
-                style="Subtitle.TLabel",
-            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-
-            self.strip_scroll = ScrollableFrame(mixer_shell, bg=self.palette.bg_alt, content_style="Surface.TFrame")
-            self.strip_scroll.grid(row=1, column=0, sticky="nsew")
-            self.strip_grid_frame = self.strip_scroll.content
-            self.strip_grid_frame.bind("<Configure>", lambda _event: self._queue_strip_layout())
-
-            for row_index, (source_key, label) in enumerate(self.route_rows, start=1):
-                self._create_strip_card(source_key, label, row_index)
-
-            self.status_bar = ttk.Frame(shell, style="Status.TFrame", padding=(16, 12))
-            self.status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+            self.status_bar = ttk.Frame(bottom_shell, style="Status.TFrame", padding=(16, 10))
+            self.status_bar.grid(row=1, column=0, sticky="ew")
             self.status_bar.columnconfigure(0, weight=1)
             ttk.Label(self.status_bar, textvariable=self.status_var, style="Status.TLabel").grid(
                 row=0, column=0, sticky="w"
             )
 
+            self.root.after(80, lambda: main_panes.sashpos(0, max(260, self.root.winfo_height() - 245)))
             self._refresh_strip_metadata()
             self._queue_strip_layout()
 
         def _create_strip_card(self, source_key: str, label: str, row_index: int) -> None:
-            card = ttk.Frame(self.strip_grid_frame, style="Card.TFrame", padding=14)
+            card = ttk.Frame(self.strip_grid_frame, style="Card.TFrame", padding=10)
             self.strip_card_frames[source_key] = card
             card.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
@@ -659,7 +600,7 @@ def _run_gui() -> int:
             subtitle.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
             channel_body = tk.Frame(card, bg=self.palette.panel_alt)
-            channel_body.pack(fill="both", expand=True, pady=(14, 10))
+            channel_body.pack(fill="both", expand=True, pady=(10, 8))
             self.strip_card_bodies[source_key] = channel_body
             channel_body.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
@@ -667,16 +608,16 @@ def _run_gui() -> int:
                 channel_body,
                 level_getter=lambda source_key=source_key: self._meter_level_for_strip(source_key),
                 orientation="vertical",
-                height=190,
-                width=28,
-                segments=28,
+                height=160,
+                width=24,
+                segments=24,
             )
             meter.pack(side="left", fill="y")
             meter.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
             self.strip_meters[source_key] = meter
 
             slider_column = tk.Frame(channel_body, bg=self.palette.panel_alt)
-            slider_column.pack(side="left", fill="y", expand=True, padx=(14, 0))
+            slider_column.pack(side="left", fill="y", expand=True, padx=(10, 0))
             slider_column.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
             ttk.Label(slider_column, textvariable=self.strip_volume_readout_vars[source_key], style="CardTitle.TLabel").pack(
@@ -689,14 +630,14 @@ def _run_gui() -> int:
                 orient="vertical",
                 variable=self.strip_volume_vars[source_key],
                 style="Mixer.Vertical.TScale",
-                length=210,
+                length=175,
             )
             volume_scale.pack(fill="y", expand=True, pady=(10, 8))
             volume_scale.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
             ttk.Label(slider_column, text="Gain", style="CardSubtitle.TLabel").pack(anchor="center")
 
             controls = tk.Frame(card, bg=self.palette.panel_alt)
-            controls.pack(fill="x", pady=(0, 10))
+            controls.pack(fill="x", pady=(0, 8))
 
             mute_toggle = NeonToggle(
                 controls,
@@ -760,7 +701,7 @@ def _run_gui() -> int:
         def _layout_strip_cards(self) -> None:
             self.layout_after_id = None
             width = max(1, self.strip_grid_frame.winfo_width())
-            column_count = max(1, min(len(self.route_rows), width // 245))
+            column_count = max(1, min(len(self.route_rows), width // 205))
             if column_count == self.strip_layout_columns and any(frame.winfo_manager() for frame in self.strip_card_frames.values()):
                 return
             self.strip_layout_columns = column_count
@@ -773,7 +714,7 @@ def _run_gui() -> int:
             for index, (source_key, _label) in enumerate(self.route_rows):
                 row = index // column_count
                 column = index % column_count
-                self.strip_card_frames[source_key].grid(row=row, column=column, sticky="nsew", padx=8, pady=8)
+                self.strip_card_frames[source_key].grid(row=row, column=column, sticky="nsew", padx=5, pady=5)
                 self.strip_grid_frame.rowconfigure(row, weight=1)
             for column in range(column_count):
                 self.strip_grid_frame.columnconfigure(column, weight=1, uniform="strip")
