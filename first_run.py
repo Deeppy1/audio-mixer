@@ -3,7 +3,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-REQUIRED_PIPEWIRE_VERSION = (1, 6, 5)
+REQUIRED_PIPEWIRE_VERSION = (1, 6, 2)
 
 STATE_FILE = Path("run_state.json")
 

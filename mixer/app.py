@@ -41,7 +41,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="SOURCE:TARGET",
-        help="Enable a route such as hw1:A1, hw1:B1, vi1:A2, vi2:B2",
+        help="Enable a route such as hw1:A1, vi1:A2, vi2:B2",
     ) 
 
     output_test_parser = subparsers.add_parser("test-output", help="Play a short test tone to a sink")
@@ -679,8 +679,14 @@ def _run_gui() -> int:
                 "B1": self.palette.accent_soft,
                 "B2": "#C45EFF",
             }
+            default_routes = {
+                "hardware_input_1": {"B1"},
+                "system_playback": {"A1"},
+                "virtual_input_1": {"A1"},
+                "virtual_input_2": {"A1"},
+            }
             for target in self.ROUTE_TARGETS:
-                variable = tk.BooleanVar(value=target in ("A1", "B1") and row_index == 1)
+                variable = tk.BooleanVar(value=target in default_routes.get(source_key, set()))
                 self.route_vars[source_key][target] = variable
                 toggle = NeonToggle(
                     route_row_top if target in ("A1", "A2") else route_row_bottom,
