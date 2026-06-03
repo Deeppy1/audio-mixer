@@ -231,17 +231,52 @@ class StudioFader(tk.Canvas):
             if value in (0, 100, 150):
                 self.create_text(center + 22, y, text=str(value), fill=self.palette.text_dim, font=("DejaVu Sans Condensed", 7))
 
-        knob_center = max(18, center - 9)
-        knob_half_width = min(17, max(13, width // 4))
-        knob_height = 18
+        knob_center = center
+        knob_half_width = 8
+        knob_height = 30
+
         x1 = knob_center - knob_half_width
         x2 = knob_center + knob_half_width
         y1 = knob_y - knob_height // 2
         y2 = knob_y + knob_height // 2
-        self.create_rectangle(x1 + 2, y1 + 2, x2 + 2, y2 + 2, fill="#050708", outline="")
-        self.create_rectangle(x1, y1, x2, y2, fill="#D2CDC1", outline="#F6F1E8", width=1)
-        self.create_line(x1 + 5, knob_y, x2 - 5, knob_y, fill="#6B6F6A", width=2)
-        self.create_line(x1 + 6, y1 + 4, x2 - 6, y1 + 4, fill="#FFFFFF")
+
+        # Shadow
+        self.create_rectangle(
+            x1 + 2,
+            y1 + 2,
+            x2 + 2,
+            y2 + 2,
+            fill="#050708",
+            outline=""
+        )
+
+        # Main body
+        self.create_rectangle(
+            x1,
+            y1,
+            x2,
+            y2,
+            fill="#151B20",
+            outline=""
+        )
+
+        # Gold top + left border
+        self.create_line(x1, y1, x2, y1, fill=self.palette.accent, width=1)
+        self.create_line(x1, y1, x1, y2, fill=self.palette.accent, width=1)
+
+        # Cyan bottom + right border
+        self.create_line(x1, y2, x2, y2, fill=self.palette.accent_soft, width=1)
+        self.create_line(x2, y1, x2, y2, fill=self.palette.accent_soft, width=1)
+
+        # Grip bars
+        for offset in (-6, -3, 0, 3, 6):
+            self.create_line(
+                x1 + 3,
+                knob_y + offset,
+                x2 - 3,
+                knob_y + offset,
+                fill=self.palette.accent,
+            )
 
     def _value_to_y(self, value: float, top: int, bottom: int) -> float:
         high = max(self.from_, self.to)
