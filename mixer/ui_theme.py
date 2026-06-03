@@ -7,25 +7,25 @@ from tkinter import font, ttk
 
 @dataclass(frozen=True)
 class MixerPalette:
-    bg: str = "#090B16"
-    bg_alt: str = "#0F1324"
-    panel: str = "#11172A"
-    panel_alt: str = "#171E35"
-    panel_selected: str = "#1D2644"
-    border: str = "#253255"
-    border_glow: str = "#3D7CFF"
-    text: str = "#F1F5FF"
-    text_muted: str = "#8FA3CC"
-    text_dim: str = "#66789D"
-    accent: str = "#56A7FF"
-    accent_soft: str = "#7F6BFF"
-    accent_bright: str = "#82F3FF"
-    success: str = "#1DD6A2"
-    warning: str = "#FFBC52"
-    danger: str = "#FF6D8B"
-    meter_low: str = "#1DD6A2"
-    meter_mid: str = "#6CD8FF"
-    meter_high: str = "#ff7cc4"
+    bg: str = "#0A0D0F"
+    bg_alt: str = "#101519"
+    panel: str = "#151B20"
+    panel_alt: str = "#1A2228"
+    panel_selected: str = "#202D32"
+    border: str = "#2D3A40"
+    border_glow: str = "#D7A64C"
+    text: str = "#F2EFE6"
+    text_muted: str = "#A8B0AD"
+    text_dim: str = "#64706E"
+    accent: str = "#D7A64C"
+    accent_soft: str = "#2BA6A1"
+    accent_bright: str = "#7CE0D5"
+    success: str = "#68D391"
+    warning: str = "#F3B85B"
+    danger: str = "#FF6F61"
+    meter_low: str = "#68D391"
+    meter_mid: str = "#D7A64C"
+    meter_high: str = "#FF6F61"
 
 
 PALETTE = MixerPalette()
@@ -36,12 +36,12 @@ def apply_theme(root: tk.Misc) -> ttk.Style:
     style.theme_use("clam")
 
     default_font = font.nametofont("TkDefaultFont")
-    default_font.configure(family="DejaVu Sans", size=10)
+    default_font.configure(family="DejaVu Sans Condensed", size=10)
     text_font = font.nametofont("TkTextFont")
-    text_font.configure(family="DejaVu Sans", size=10)
-    heading_font = font.Font(root=root, family="DejaVu Sans", size=20, weight="bold")
-    section_font = font.Font(root=root, family="DejaVu Sans", size=11, weight="bold")
-    compact_font = font.Font(root=root, family="DejaVu Sans", size=9)
+    text_font.configure(family="DejaVu Sans Condensed", size=10)
+    heading_font = font.Font(root=root, family="DejaVu Serif", size=20, weight="bold")
+    section_font = font.Font(root=root, family="DejaVu Sans Condensed", size=11, weight="bold")
+    compact_font = font.Font(root=root, family="DejaVu Sans Condensed", size=9)
 
     root.option_add("*Font", default_font)
     root.option_add("*TCombobox*Listbox.background", PALETTE.panel_alt)
@@ -58,8 +58,8 @@ def apply_theme(root: tk.Misc) -> ttk.Style:
     style.configure("Shell.TFrame", background=PALETTE.bg)
     style.configure("Surface.TFrame", background=PALETTE.bg_alt)
     style.configure("Panel.TFrame", background=PALETTE.panel, relief="flat", borderwidth=0)
-    style.configure("Card.TFrame", background=PALETTE.panel_alt, relief="flat", borderwidth=1)
-    style.configure("SelectedCard.TFrame", background=PALETTE.panel_selected, relief="flat", borderwidth=1)
+    style.configure("Card.TFrame", background=PALETTE.panel_alt, relief="solid", borderwidth=1)
+    style.configure("SelectedCard.TFrame", background=PALETTE.panel_selected, relief="solid", borderwidth=1)
     style.configure("Toolbar.TFrame", background=PALETTE.bg)
     style.configure("Status.TFrame", background=PALETTE.panel)
 
@@ -93,7 +93,7 @@ def apply_theme(root: tk.Misc) -> ttk.Style:
         lightcolor=PALETTE.panel_alt,
         darkcolor=PALETTE.panel_alt,
         relief="flat",
-        padding=(14, 9),
+        padding=(12, 7),
     )
     style.map(
         "TButton",
@@ -104,7 +104,7 @@ def apply_theme(root: tk.Misc) -> ttk.Style:
     style.configure(
         "Accent.TButton",
         background=PALETTE.accent,
-        foreground="#06111F",
+        foreground="#141008",
         bordercolor=PALETTE.accent_bright,
         lightcolor=PALETTE.accent,
         darkcolor=PALETTE.accent,
@@ -112,7 +112,7 @@ def apply_theme(root: tk.Misc) -> ttk.Style:
     style.map(
         "Accent.TButton",
         background=[("active", PALETTE.accent_bright), ("pressed", PALETTE.accent_soft)],
-        foreground=[("pressed", "#06111F")],
+        foreground=[("pressed", "#141008")],
     )
 
     style.configure(

@@ -255,7 +255,7 @@ def _run_gui() -> int:
     from .eq import EQState
     from .eq_ui import ParametricEQWindow
     from .ui_theme import PALETTE, apply_theme
-    from .ui_widgets import AnimatedLevelMeter, NeonToggle
+    from .ui_widgets import AnimatedLevelMeter, NeonToggle, StudioFader
 
     class MixerApp:
         ROUTE_TARGETS = ("A1", "A2", "B1", "B2")
@@ -279,8 +279,8 @@ def _run_gui() -> int:
             self.palette = PALETTE
             self.style = apply_theme(self.root)
             self.root.title("Audio Mixer Studio")
-            self.root.geometry("1280x760")
-            self.root.minsize(960, 620)
+            self.root.geometry("1240x760")
+            self.root.minsize(760, 560)
             self.root.protocol("WM_DELETE_WINDOW", self.close)
 
             self.status_var = tk.StringVar(value="Ready")
@@ -359,6 +359,7 @@ def _run_gui() -> int:
             self.keybind_window: tk.Toplevel | None = None
             self.ducking_window: tk.Toplevel | None = None
             self.apps_window: tk.Toplevel | None = None
+            self.devices_window: tk.Toplevel | None = None
             self.apps_content_frame = None
             self.app_assignments: dict[str, str] = {}
             self.eq_states = {
@@ -373,7 +374,9 @@ def _run_gui() -> int:
             self.meter_levels = {source_key: 0.0 for source_key, _label in self.route_rows}
             self.meter_workers: dict[str, MixerApp.MeterWorker] = {}
             self.strip_layout_columns = 0
+            self.action_layout_columns = 0
             self.layout_after_id: str | None = None
+            self.action_layout_after_id: str | None = None
             self.eq_apply_after_id: str | None = None
             self.command_server_socket: socket.socket | None = None
             self.command_server_thread: threading.Thread | None = None
@@ -398,7 +401,7 @@ def _run_gui() -> int:
             self._restart_meter_workers()
 
         def _build_ui(self) -> None:
-            shell = ttk.Frame(self.root, style="Shell.TFrame", padding=14)
+            shell = ttk.Frame(self.root, style="Shell.TFrame", padding=12)
             shell.pack(fill="both", expand=True)
             shell.columnconfigure(0, weight=1)
             shell.rowconfigure(1, weight=1)
@@ -416,38 +419,35 @@ def _run_gui() -> int:
                 style="Subtitle.TLabel",
             ).pack(anchor="w", pady=(4, 0))
 
-            action_bar = ttk.Frame(header, style="Toolbar.TFrame")
-            action_bar.grid(row=1, column=0, sticky="w", pady=(12, 0))
-            ttk.Button(
-                action_bar,
-                text="Create / Repair Virtual Devices",
-                command=self.create_virtual_devices,
-                style="Ghost.TButton",
-            ).pack(side="left", padx=(0, 10))
-            ttk.Button(action_bar, text="Refresh", command=self.refresh_devices, style="Ghost.TButton").pack(
-                side="left", padx=(0, 10)
-            )
-            ttk.Button(action_bar, text="Apply Routing", command=self.apply_routing, style="Accent.TButton").pack(
-                side="left", padx=(0, 10)
-            )
-            ttk.Button(
-                action_bar,
-                text="Set Desktop To VM_System",
-                command=self.set_default_system,
-                style="Ghost.TButton",
-            ).pack(side="left", padx=(0, 10))
-            ttk.Button(action_bar, text="EQ", command=self.open_eq_window, style="Ghost.TButton").pack(side="left", padx=(0, 10))
-            ttk.Button(action_bar, text="Apps", command=self.open_apps_window).pack(side="left", padx=(0, 10))
-            ttk.Button(action_bar, text="Keybinds", command=self.open_keybind_window).pack(side="left", padx=(0, 10))
-            ttk.Button(action_bar, text="Ducking", command=self.open_ducking_window).pack(side="left")
+            self.action_bar = ttk.Frame(header, style="Toolbar.TFrame")
+            self.action_bar.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+            self.action_bar.bind("<Configure>", lambda _event: self._queue_action_layout())
+            self.action_buttons = [
+                ttk.Button(
+                    self.action_bar,
+                    text="Create Devices",
+                    command=self.create_virtual_devices,
+                    style="Ghost.TButton",
+                ),
+                ttk.Button(self.action_bar, text="Refresh", command=self.refresh_devices, style="Ghost.TButton"),
+                ttk.Button(self.action_bar, text="Apply Routing", command=self.apply_routing, style="Accent.TButton"),
+                ttk.Button(
+                    self.action_bar,
+                    text="Desktop To VM_System",
+                    command=self.set_default_system,
+                    style="Ghost.TButton",
+                ),
+                ttk.Button(self.action_bar, text="EQ", command=self.open_eq_window, style="Ghost.TButton"),
+                ttk.Button(self.action_bar, text="Devices", command=self.open_devices_window, style="Ghost.TButton"),
+                ttk.Button(self.action_bar, text="Apps", command=self.open_apps_window, style="Ghost.TButton"),
+                ttk.Button(self.action_bar, text="Keybinds", command=self.open_keybind_window, style="Ghost.TButton"),
+                ttk.Button(self.action_bar, text="Ducking", command=self.open_ducking_window, style="Ghost.TButton"),
+            ]
 
-            main_panes = ttk.PanedWindow(shell, orient=tk.VERTICAL)
-            main_panes.grid(row=1, column=0, sticky="nsew")
-
-            mixer_shell = ttk.Frame(main_panes, style="Surface.TFrame")
+            mixer_shell = ttk.Frame(shell, style="Surface.TFrame")
+            mixer_shell.grid(row=1, column=0, sticky="nsew")
             mixer_shell.columnconfigure(0, weight=1)
             mixer_shell.rowconfigure(1, weight=1)
-            main_panes.add(mixer_shell, weight=1)
 
             mix_header = ttk.Frame(mixer_shell, style="Surface.TFrame")
             mix_header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -466,124 +466,23 @@ def _run_gui() -> int:
             for row_index, (source_key, label) in enumerate(self.route_rows, start=1):
                 self._create_strip_card(source_key, label, row_index)
 
-            bottom_shell = ttk.Frame(main_panes, style="Panel.TFrame")
-            bottom_shell.columnconfigure(0, weight=1)
-            bottom_shell.rowconfigure(0, weight=1)
-            main_panes.add(bottom_shell, weight=0)
-
-            control_tray = ttk.Frame(bottom_shell, style="Panel.TFrame", padding=12)
-            control_tray.grid(row=0, column=0, sticky="nsew")
-            for column in range(4):
-                control_tray.columnconfigure(column, weight=1, uniform="control")
-
-            outputs_panel = ttk.LabelFrame(control_tray, text="Outputs", style="Panel.TLabelframe", padding=10)
-            outputs_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-            outputs_panel.columnconfigure(0, weight=1)
-
-            ttk.Label(outputs_panel, text="A1 Physical Output", style="Body.TLabel").grid(row=0, column=0, sticky="w")
-            self.a1_combo = ttk.Combobox(outputs_panel, textvariable=self.a1_display_var, state="readonly")
-            self.a1_combo.grid(row=1, column=0, sticky="ew", pady=(6, 8))
-            self.a1_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("a1"))
-            ttk.Button(
-                outputs_panel,
-                text="Test A1",
-                command=lambda: self.run_in_background(self.test_output_a1),
-                style="Ghost.TButton",
-            ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 8))
-
-            ttk.Label(outputs_panel, text="A2 Physical Output", style="Body.TLabel").grid(row=2, column=0, sticky="w")
-            self.a2_combo = ttk.Combobox(outputs_panel, textvariable=self.a2_display_var, state="readonly")
-            self.a2_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
-            self.a2_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("a2"))
-            ttk.Button(
-                outputs_panel,
-                text="Test A2",
-                command=lambda: self.run_in_background(self.test_output_a2),
-                style="Ghost.TButton",
-            ).grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
-
-            inputs_panel = ttk.LabelFrame(control_tray, text="Hardware Inputs", style="Panel.TLabelframe", padding=10)
-            inputs_panel.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
-            inputs_panel.columnconfigure(0, weight=1)
-
-            ttk.Label(inputs_panel, text="Hardware In 1", style="Body.TLabel").grid(row=0, column=0, sticky="w")
-            self.hw1_combo = ttk.Combobox(inputs_panel, textvariable=self.hw1_display_var, state="readonly")
-            self.hw1_combo.grid(row=1, column=0, sticky="ew", pady=(6, 8))
-            self.hw1_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("hw1"))
-            ttk.Button(
-                inputs_panel,
-                text="Preview In 1",
-                command=lambda: self.run_in_background(self.test_input_1),
-                style="Ghost.TButton",
-            ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 8))
-
-            ttk.Label(inputs_panel, text="Hardware In 2", style="Body.TLabel").grid(row=2, column=0, sticky="w")
-            self.hw2_combo = ttk.Combobox(inputs_panel, textvariable=self.hw2_display_var, state="readonly")
-            self.hw2_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
-            self.hw2_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("hw2"))
-            ttk.Button(
-                inputs_panel,
-                text="Preview In 2",
-                command=lambda: self.run_in_background(self.test_input_2),
-                style="Ghost.TButton",
-            ).grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
-
-            monitor_panel = ttk.LabelFrame(control_tray, text="Monitoring", style="Panel.TLabelframe", padding=10)
-            monitor_panel.grid(row=0, column=2, sticky="nsew", padx=(0, 8))
-            monitor_panel.columnconfigure(0, weight=1)
-            ttk.Label(monitor_panel, text="Selected Strip", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(monitor_panel, textvariable=self.selected_strip_label_var, style="Section.TLabel").grid(
-                row=1, column=0, sticky="w", pady=(4, 0)
-            )
-            ttk.Label(monitor_panel, textvariable=self.selected_strip_hint_var, style="Muted.TLabel", wraplength=250).grid(
-                row=2, column=0, sticky="w", pady=(4, 10)
-            )
-            self.monitor_meter = AnimatedLevelMeter(
-                monitor_panel,
-                level_getter=lambda: self._meter_level_for_strip(self.selected_strip_var.get()),
-                orientation="horizontal",
-                height=18,
-                width=260,
-                segments=24,
-            )
-            self.monitor_meter.grid(row=3, column=0, sticky="ew")
-            ttk.Label(monitor_panel, text="Level", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=(8, 0))
-            ttk.Label(monitor_panel, textvariable=self.selected_strip_volume_var, style="Body.TLabel").grid(
-                row=5, column=0, sticky="w"
-            )
-            ttk.Label(monitor_panel, text="Routes", style="Muted.TLabel").grid(row=6, column=0, sticky="w", pady=(8, 0))
-            ttk.Label(monitor_panel, textvariable=self.selected_strip_routes_var, style="Body.TLabel", wraplength=250).grid(
-                row=7, column=0, sticky="w"
-            )
-
-            status_panel = ttk.LabelFrame(control_tray, text="Session", style="Panel.TLabelframe", padding=10)
-            status_panel.grid(row=0, column=3, sticky="nsew")
-            status_panel.columnconfigure(0, weight=1)
-
-            status = updatecheck()
-            help_text = (
-                "VM_System handles desktop playback.\n"
-                "VM_Input_1 and VM_Input_2 are assignable app playback lanes.\n"
-                "B1 and B2 expose monitor buses for capture apps.\n"
-                f"Version: {version}  {status}"
-            )
-            ttk.Label(status_panel, text=help_text, style="Muted.TLabel", justify="left", wraplength=260).grid(
-                row=0, column=0, sticky="w"
-            )
-
-            self.status_bar = ttk.Frame(bottom_shell, style="Status.TFrame", padding=(16, 10))
-            self.status_bar.grid(row=1, column=0, sticky="ew")
+            self.update_status_var = tk.StringVar(value=f"Version: {version}  {updatecheck()}")
+            self.status_bar = ttk.Frame(shell, style="Status.TFrame", padding=(14, 8))
+            self.status_bar.grid(row=2, column=0, sticky="ew", pady=(10, 0))
             self.status_bar.columnconfigure(0, weight=1)
             ttk.Label(self.status_bar, textvariable=self.status_var, style="Status.TLabel").grid(
                 row=0, column=0, sticky="w"
             )
+            ttk.Label(self.status_bar, textvariable=self.update_status_var, style="Muted.TLabel").grid(
+                row=0, column=1, sticky="e", padx=(14, 0)
+            )
 
-            self.root.after(80, lambda: main_panes.sashpos(0, max(260, self.root.winfo_height() - 245)))
             self._refresh_strip_metadata()
             self._queue_strip_layout()
+            self._queue_action_layout()
 
         def _create_strip_card(self, source_key: str, label: str, row_index: int) -> None:
-            card = ttk.Frame(self.strip_grid_frame, style="Card.TFrame", padding=10)
+            card = ttk.Frame(self.strip_grid_frame, style="Card.TFrame", padding=9)
             self.strip_card_frames[source_key] = card
             card.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
@@ -600,7 +499,7 @@ def _run_gui() -> int:
             subtitle.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
             channel_body = tk.Frame(card, bg=self.palette.panel_alt)
-            channel_body.pack(fill="both", expand=True, pady=(10, 8))
+            channel_body.pack(fill="both", expand=True, pady=(8, 8))
             self.strip_card_bodies[source_key] = channel_body
             channel_body.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
@@ -612,32 +511,60 @@ def _run_gui() -> int:
                 width=24,
                 segments=24,
             )
-            meter.pack(side="left", fill="y")
+            meter.pack(side="left", fill="y", padx=(0, 8))
             meter.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
             self.strip_meters[source_key] = meter
 
             slider_column = tk.Frame(channel_body, bg=self.palette.panel_alt)
-            slider_column.pack(side="left", fill="y", expand=True, padx=(10, 0))
+            slider_column.pack(side="left", fill="both", expand=True)
             slider_column.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
 
             ttk.Label(slider_column, textvariable=self.strip_volume_readout_vars[source_key], style="CardTitle.TLabel").pack(
                 anchor="center"
             )
-            volume_scale = ttk.Scale(
+            volume_scale = StudioFader(
                 slider_column,
+                variable=self.strip_volume_vars[source_key],
                 from_=150,
                 to=0,
-                orient="vertical",
-                variable=self.strip_volume_vars[source_key],
-                style="Mixer.Vertical.TScale",
-                length=175,
+                height=190,
+                palette=self.palette,
+                select_command=lambda source_key=source_key: self.select_strip(source_key),
             )
-            volume_scale.pack(fill="y", expand=True, pady=(10, 8))
-            volume_scale.bind("<Button-1>", lambda _event, source_key=source_key: self.select_strip(source_key))
+            volume_scale.pack(fill="both", expand=True, pady=(8, 6))
             ttk.Label(slider_column, text="Gain", style="CardSubtitle.TLabel").pack(anchor="center")
 
+            routes = tk.Frame(channel_body, bg=self.palette.panel_alt)
+            routes.pack(side="left", fill="y", padx=(8, 0))
+            self.route_vars[source_key] = {}
+            route_colors = {
+                "A1": self.palette.accent,
+                "A2": self.palette.accent_bright,
+                "B1": self.palette.accent_soft,
+                "B2": "#C45EFF",
+            }
+            default_routes = {
+                "hardware_input_1": {"B1"},
+                "system_playback": {"A1"},
+                "virtual_input_1": {"A1"},
+                "virtual_input_2": {"A1"},
+            }
+            for target in self.ROUTE_TARGETS:
+                variable = tk.BooleanVar(value=target in default_routes.get(source_key, set()))
+                self.route_vars[source_key][target] = variable
+                toggle = NeonToggle(
+                    routes,
+                    text=target,
+                    variable=variable,
+                    palette=self.palette,
+                    on_color=route_colors[target],
+                    width=3,
+                    command=lambda source_key=source_key: self.select_strip(source_key),
+                )
+                toggle.pack(fill="x", pady=(0, 5))
+
             controls = tk.Frame(card, bg=self.palette.panel_alt)
-            controls.pack(fill="x", pady=(0, 8))
+            controls.pack(fill="x")
 
             mute_toggle = NeonToggle(
                 controls,
@@ -666,48 +593,38 @@ def _run_gui() -> int:
                 style="Ghost.TButton",
             ).pack(side="right")
 
-            routes = tk.Frame(card, bg=self.palette.panel_alt)
-            routes.pack(fill="x")
-            route_row_top = tk.Frame(routes, bg=self.palette.panel_alt)
-            route_row_top.pack(fill="x")
-            route_row_bottom = tk.Frame(routes, bg=self.palette.panel_alt)
-            route_row_bottom.pack(fill="x", pady=(6, 0))
-            self.route_vars[source_key] = {}
-            route_colors = {
-                "A1": self.palette.accent,
-                "A2": self.palette.accent_bright,
-                "B1": self.palette.accent_soft,
-                "B2": "#C45EFF",
-            }
-            default_routes = {
-                "hardware_input_1": {"B1"},
-                "system_playback": {"A1"},
-                "virtual_input_1": {"A1"},
-                "virtual_input_2": {"A1"},
-            }
-            for target in self.ROUTE_TARGETS:
-                variable = tk.BooleanVar(value=target in default_routes.get(source_key, set()))
-                self.route_vars[source_key][target] = variable
-                toggle = NeonToggle(
-                    route_row_top if target in ("A1", "A2") else route_row_bottom,
-                    text=target,
-                    variable=variable,
-                    palette=self.palette,
-                    on_color=route_colors[target],
-                    width=4,
-                    command=lambda source_key=source_key: self.select_strip(source_key),
-                )
-                toggle.pack(side="left", padx=(0, 6))
-
         def _queue_strip_layout(self) -> None:
             if self.layout_after_id:
                 self.root.after_cancel(self.layout_after_id)
             self.layout_after_id = self.root.after(40, self._layout_strip_cards)
 
+        def _queue_action_layout(self) -> None:
+            if self.action_layout_after_id:
+                self.root.after_cancel(self.action_layout_after_id)
+            self.action_layout_after_id = self.root.after(40, self._layout_action_buttons)
+
+        def _layout_action_buttons(self) -> None:
+            self.action_layout_after_id = None
+            width = max(1, self.action_bar.winfo_width())
+            column_count = len(self.action_buttons) if width >= 1120 else 4 if width >= 860 else 3 if width >= 650 else 2
+            if column_count == self.action_layout_columns and any(button.winfo_manager() for button in self.action_buttons):
+                return
+            self.action_layout_columns = column_count
+            for button in self.action_buttons:
+                button.grid_forget()
+            for column in range(len(self.action_buttons)):
+                self.action_bar.columnconfigure(column, weight=0)
+            for index, button in enumerate(self.action_buttons):
+                row = index // column_count
+                column = index % column_count
+                button.grid(row=row, column=column, sticky="ew", padx=(0, 8), pady=(0, 8))
+            for column in range(column_count):
+                self.action_bar.columnconfigure(column, weight=1, uniform="actions")
+
         def _layout_strip_cards(self) -> None:
             self.layout_after_id = None
             width = max(1, self.strip_grid_frame.winfo_width())
-            column_count = max(1, min(len(self.route_rows), width // 205))
+            column_count = max(1, min(len(self.route_rows), width // 190))
             if column_count == self.strip_layout_columns and any(frame.winfo_manager() for frame in self.strip_card_frames.values()):
                 return
             self.strip_layout_columns = column_count
@@ -897,10 +814,7 @@ def _run_gui() -> int:
             self.sink_display_to_name, self.sink_name_to_display, sink_values = self._display_entries_for_devices(visible_sinks)
             self.source_display_to_name, self.source_name_to_display, source_values = self._display_entries_for_devices(visible_sources)
 
-            self.a1_combo["values"] = sink_values
-            self.a2_combo["values"] = sink_values
-            self.hw1_combo["values"] = source_values
-            self.hw2_combo["values"] = source_values
+            self._update_device_combo_values(sink_values, source_values)
 
             if self.sinks and not self.a1_var.get():
                 self.a1_var.set(self.sinks[0])
@@ -924,6 +838,18 @@ def _run_gui() -> int:
                 f"Detected {len(self.sinks)} outputs, {len(self.sources)} inputs. "
                 f"B1={b1_monitor} B2={b2_monitor}"
             )
+
+        def _update_device_combo_values(self, sink_values: list[str] | None = None, source_values: list[str] | None = None) -> None:
+            if self.devices_window is None or not self.devices_window.winfo_exists():
+                return
+            if sink_values is None:
+                sink_values = list(self.sink_display_to_name)
+            if source_values is None:
+                source_values = list(self.source_display_to_name)
+            self.a1_combo["values"] = sink_values
+            self.a2_combo["values"] = sink_values
+            self.hw1_combo["values"] = source_values
+            self.hw2_combo["values"] = source_values
 
         def _bind_shortcuts(self) -> None:
             self.root.bind_all("<KeyPress>", self._handle_keypress, add="+")
@@ -1451,6 +1377,104 @@ def _run_gui() -> int:
 
             self.status_var.set("Ducking window opened.")
 
+        def open_devices_window(self) -> None:
+            if self.devices_window is not None and self.devices_window.winfo_exists():
+                self.devices_window.deiconify()
+                self.devices_window.update_idletasks()
+                self.devices_window.lift()
+                self.devices_window.focus_set()
+                self._sync_display_device_vars()
+                self._update_device_combo_values()
+                self.status_var.set("Devices window opened.")
+                return
+
+            window = tk.Toplevel(self.root)
+            window.title("Devices")
+            window.geometry("760x420")
+            window.minsize(640, 360)
+            window.configure(bg=self.palette.bg)
+            window.protocol("WM_DELETE_WINDOW", self.close_devices_window)
+            window.update_idletasks()
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            self.devices_window = window
+
+            frame = ttk.Frame(window, style="Shell.TFrame", padding=20)
+            frame.pack(fill="both", expand=True)
+            frame.columnconfigure(0, weight=1)
+            frame.columnconfigure(1, weight=1)
+
+            ttk.Label(frame, text="Devices", style="Title.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+            ttk.Label(
+                frame,
+                text="Assign physical outputs and hardware inputs for the mixer strips.",
+                style="Subtitle.TLabel",
+            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 18))
+
+            outputs_panel = ttk.LabelFrame(frame, text="Outputs", style="Panel.TLabelframe", padding=14)
+            outputs_panel.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
+            outputs_panel.columnconfigure(0, weight=1)
+
+            ttk.Label(outputs_panel, text="A1 Physical Output", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+            self.a1_combo = ttk.Combobox(outputs_panel, textvariable=self.a1_display_var, state="readonly")
+            self.a1_combo.grid(row=1, column=0, sticky="ew", pady=(6, 10))
+            self.a1_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("a1"))
+            ttk.Button(
+                outputs_panel,
+                text="Test A1",
+                command=lambda: self.run_in_background(self.test_output_a1),
+                style="Ghost.TButton",
+            ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 10))
+
+            ttk.Label(outputs_panel, text="A2 Physical Output", style="Body.TLabel").grid(row=2, column=0, sticky="w")
+            self.a2_combo = ttk.Combobox(outputs_panel, textvariable=self.a2_display_var, state="readonly")
+            self.a2_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+            self.a2_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("a2"))
+            ttk.Button(
+                outputs_panel,
+                text="Test A2",
+                command=lambda: self.run_in_background(self.test_output_a2),
+                style="Ghost.TButton",
+            ).grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
+
+            inputs_panel = ttk.LabelFrame(frame, text="Hardware Inputs", style="Panel.TLabelframe", padding=14)
+            inputs_panel.grid(row=2, column=1, sticky="nsew", padx=(8, 0))
+            inputs_panel.columnconfigure(0, weight=1)
+
+            ttk.Label(inputs_panel, text="Hardware In 1", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+            self.hw1_combo = ttk.Combobox(inputs_panel, textvariable=self.hw1_display_var, state="readonly")
+            self.hw1_combo.grid(row=1, column=0, sticky="ew", pady=(6, 10))
+            self.hw1_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("hw1"))
+            ttk.Button(
+                inputs_panel,
+                text="Preview In 1",
+                command=lambda: self.run_in_background(self.test_input_1),
+                style="Ghost.TButton",
+            ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 10))
+
+            ttk.Label(inputs_panel, text="Hardware In 2", style="Body.TLabel").grid(row=2, column=0, sticky="w")
+            self.hw2_combo = ttk.Combobox(inputs_panel, textvariable=self.hw2_display_var, state="readonly")
+            self.hw2_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+            self.hw2_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_actual_device_var("hw2"))
+            ttk.Button(
+                inputs_panel,
+                text="Preview In 2",
+                command=lambda: self.run_in_background(self.test_input_2),
+                style="Ghost.TButton",
+            ).grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
+
+            actions = ttk.Frame(frame, style="Toolbar.TFrame")
+            actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+            ttk.Button(actions, text="Refresh", command=self.refresh_devices, style="Ghost.TButton").pack(side="left")
+            ttk.Button(actions, text="Apply Routing", command=self.apply_routing, style="Accent.TButton").pack(
+                side="left", padx=(10, 0)
+            )
+
+            self._sync_display_device_vars()
+            self._update_device_combo_values()
+            self.status_var.set("Devices window opened.")
+
         def open_apps_window(self) -> None:
             if self.apps_window is not None and self.apps_window.winfo_exists():
                 self.apps_window.deiconify()
@@ -1578,6 +1602,11 @@ def _run_gui() -> int:
                 self.apps_window.destroy()
             self.apps_window = None
             self.apps_content_frame = None
+
+        def close_devices_window(self) -> None:
+            if self.devices_window is not None and self.devices_window.winfo_exists():
+                self.devices_window.destroy()
+            self.devices_window = None
 
         def assign_app_stream(self, stream, assignment_var) -> None:
             source_key = self._app_assignment_label_to_source_key(assignment_var.get())
@@ -2081,6 +2110,7 @@ def _run_gui() -> int:
             self.close_keybind_window()
             self.close_ducking_window()
             self.close_apps_window()
+            self.close_devices_window()
             if self.eq_window is not None:
                 self.eq_window.close()
             if self.eq_apply_after_id:
